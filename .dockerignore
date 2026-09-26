@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.pyc
+.coverage*
+htmlcov
+dist
+build
+*.egg-info
+data
+.pytest_cache
+.mypy_cache
+.ruff_cache
+hypothesis
+.DS_Store
+tests/container/watchdog-data

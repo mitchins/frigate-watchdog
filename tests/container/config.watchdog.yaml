@@ -1,0 +1,48 @@
+schema_version: 1
+
+# Test configuration used by the container qualification suite. Production
+# timings apply (the scenario takes a few minutes on purpose).
+
+mode: recover
+
+instance: test   # MQTT topic namespace for this deployment
+
+frigate:
+  base_url: http://172.31.117.10:5000
+  auth:
+    mode: none
+
+cameras:
+  porch:
+    frigate_name: Porch
+    recovery: onvif
+    onvif:
+      endpoint: http://172.31.117.10:8000/onvif/device_service
+      username: admin
+      password_env: CAMERA_PORCH_PASSWORD
+
+  driveway:
+    frigate_name: Driveway
+    recovery: onvif
+    onvif:
+      endpoint: http://172.31.117.10:8001/onvif/device_service
+      username: admin
+      password_env: CAMERA_DRIVEWAY_PASSWORD
+
+  doorbell:
+    frigate_name: Doorbell
+    recovery: none
+
+mqtt:
+  enabled: true
+  host: mosquitto
+  port: 1883
+  topic_prefix: frigate-watchdog
+
+http:
+  enabled: true
+  host: 0.0.0.0   # explicit all-interfaces so the qualify container can query
+  port: 8080
+
+timings:
+  poll_interval_s: 5
