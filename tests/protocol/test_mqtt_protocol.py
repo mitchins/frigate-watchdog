@@ -128,7 +128,10 @@ async def test_availability_lwt_and_retained_state():
                     async with asyncio.timeout(10):
                         async for message in sub.messages:
                             got.append((str(message.topic), bytes(message.payload)))
-                            if len(got) >= 2:
+                            topics_so_far = [t for t, _ in got]
+                            if "frigate-watchdog/test/availability" in topics_so_far and any(
+                                t.endswith("/state") for t in topics_so_far
+                            ):
                                 break
                 except TimeoutError:
                     pass
@@ -187,12 +190,14 @@ async def test_duplicate_event_delivery_is_identifiable():
             await asyncio.sleep(0.2)
         assert reporter.connected, f"reporter never connected (last_error={reporter.last_error})"
         received: list[bytes] = []
+        subscribed = asyncio.Event()
 
         import aiomqtt
 
         async def subscriber():
             async with aiomqtt.Client(hostname="127.0.0.1", port=port, timeout=10) as sub:
                 await sub.subscribe("frigate-watchdog/test/events")
+                subscribed.set()
                 try:
                     async with asyncio.timeout(15):
                         async for message in sub.messages:
@@ -203,7 +208,13 @@ async def test_duplicate_event_delivery_is_identifiable():
                     pass
 
         sub_task = asyncio.create_task(subscriber())
-        await asyncio.sleep(1.0)  # let the subscription establish (events are not retained)
+        try:
+            await asyncio.wait_for(subscribed.wait(), timeout=20)
+        except TimeoutError:
+            raise AssertionError(
+                "subscriber never subscribed "
+                f"(connected={reporter.connected}, last_error={reporter.last_error})"
+            ) from None
         # duplicate delivery of the same logical event
         e = event("frames_stopped")
         reporter.publish_event(e)
@@ -216,6 +227,43 @@ async def test_duplicate_event_delivery_is_identifiable():
         )
         first, second = json.loads(received[0]), json.loads(received[-1])
         assert first["id"] == second["id"], "duplicates must carry the same stable id"
+
+
+async def test_inflight_event_retried_after_reconnect_with_same_id():
+    """A publish failure must not drop the dequeued item: it stays pending
+    and is retried on the next drain with its original stable id."""
+    import aiomqtt
+
+    cfg = MqttConfig(enabled=False, host="127.0.0.1", port=1883)
+    reporter = MqttReporter(cfg, "test", "abcd1234")
+    e = event("frames_stopped")
+    reporter.publish_event(e)
+
+    calls: list[tuple[str, bytes]] = []
+
+    class FakeClient:
+        fail = True
+
+        async def publish(self, topic, payload, qos=0, retain=False):
+            calls.append((str(topic), bytes(payload)))
+            if self.fail:
+                raise aiomqtt.MqttError("boom")
+
+    client = FakeClient()
+    with pytest.raises(aiomqtt.MqttError):
+        await reporter._drain(client)
+    assert reporter._pending is e
+    client.fail = False
+    task = asyncio.create_task(reporter._drain(client))
+    deadline = time.monotonic() + 5
+    while reporter.published_events < 1 and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    reporter._stop.set()
+    await task
+    assert reporter._pending is None
+    ids = [json.loads(p.decode())["id"] for t, p in calls if t.endswith("/events")]
+    assert len(ids) == 2, f"event must be published on retry: {calls}"
+    assert ids[0] == ids[1], "retry must reuse the original stable id"
 
 
 async def test_broker_outage_never_blocks_and_bounds_queue():

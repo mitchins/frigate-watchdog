@@ -54,6 +54,9 @@ class MqttReporter:
         self._event_id_counter = 0
         self.connected = False
         self.last_error: str | None = None
+        # Item dequeued but not yet acknowledged by the broker; retried after
+        # reconnect instead of silently dropped.
+        self._pending: Event | dict[str, Any] | None = None
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -104,6 +107,20 @@ class MqttReporter:
         backoff = RECONNECT_MIN_S
         while not self._stop.is_set():
             try:
+                # Bound the raw TCP handshake first: aiomqtt's timeout only
+                # applies after its blocking socket connect, so an
+                # unreachable broker address would otherwise wedge the
+                # reporter with no reconnect attempts. Any failure here
+                # (or a shutdown cancel) propagates to the handlers below.
+                probe_writer: asyncio.StreamWriter | None = None
+                try:
+                    _, probe_writer = await asyncio.wait_for(
+                        asyncio.open_connection(self.config.host, self.config.port),
+                        timeout=10.0,
+                    )
+                finally:
+                    if probe_writer is not None:
+                        probe_writer.close()
                 # timeout bounds the CONNECT wait and QoS 1 acknowledgements;
                 # aiomqtt surfaces expiry as MqttError, which reconnects below.
                 # Without it a slow broker would wedge the reporter forever.
@@ -141,11 +158,17 @@ class MqttReporter:
 
     async def _drain(self, client: aiomqtt.Client) -> None:
         while not self._stop.is_set():
-            try:
-                item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-            except TimeoutError:
-                continue
-            await self._publish_item(client, item)
+            if self._pending is None:
+                try:
+                    self._pending = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+                except TimeoutError:
+                    continue
+            # A publish failure propagates to _run (reconnect); the item stays
+            # in _pending and is retried on the next drain. Retried events
+            # keep their stable id: the cache keys on object identity and
+            # holds a strong reference, so the same object reuses its id.
+            await self._publish_item(client, self._pending)
+            self._pending = None
 
     async def _publish_item(self, client: aiomqtt.Client, item: Event | dict[str, Any]) -> None:
         try:
