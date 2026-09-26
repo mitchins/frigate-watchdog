@@ -1,0 +1,52 @@
+# Container-level qualification: the real built image against real fakes.
+# Used by CI and by scripts/qualify-container.sh locally.
+#
+#   docker build -t frigate-watchdog:local .
+#   docker compose -f tests/container/compose.test.yaml up \
+#       --abort-on-container-exit --exit-code-from qualify
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.117.0/24
+
+services:
+  qualify:
+    build:
+      context: ../..
+      dockerfile: tests/container/Dockerfile.fakes
+    restart: "no"
+    networks:
+      default:
+        ipv4_address: 172.31.117.10
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: "no"
+    command: ["mosquitto", "-c", /mosquitto-no-auth.conf]
+
+  watchdog:
+    image: frigate-watchdog:local
+    restart: "no"
+    user: "1000:1000"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    volumes:
+      - ./watchdog-data:/data
+      - ./config.watchdog.yaml:/config/config.yaml:ro
+    environment:
+      CAMERA_PORCH_PASSWORD: test-porch-pass
+      CAMERA_DRIVEWAY_PASSWORD: test-drive-pass
+    depends_on:
+      - mosquitto

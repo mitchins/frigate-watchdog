@@ -1,0 +1,46 @@
+# Canonical frigate-watchdog deployment.
+#
+# The watchdog only initiates outbound connections (Frigate API, camera ONVIF
+# endpoints, optional MQTT). It needs no Docker socket, no device access, no
+# host networking, and publishes no ports by default. To inspect /health,
+# /stats, /history from the host, uncomment the loopback port mapping — it
+# binds to 127.0.0.1 only, never all interfaces.
+
+services:
+  watchdog:
+    build: .
+    image: frigate-watchdog:local
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    volumes:
+      # Persistent durable state: recovery limits live here. KEEP THIS VOLUME.
+      - ./data:/data
+      # Read-only configuration.
+      - ./config:/config:ro
+    environment:
+      # Resolve every *_password_env from the configured credentials.
+      CAMERA_PORCH_PASSWORD: ${CAMERA_PORCH_PASSWORD:?set in your environment}
+      # CAMERA_DRIVEWAY_PASSWORD: ${CAMERA_DRIVEWAY_PASSWORD:?}
+      # FRIGATE_WATCHDOG_PASSWORD: ${FRIGATE_WATCHDOG_PASSWORD:-}
+      # MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      TZ: ${TZ:-Etc/UTC}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          pids: 100
+          cpus: "0.50"
+    # Optional local status surface (loopback only):
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

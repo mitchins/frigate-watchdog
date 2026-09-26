@@ -1,0 +1,97 @@
+[project]
+name = "frigate-watchdog"
+version = "0.1.0"
+description = "Cautious camera-recovery appliance for Frigate: one bounded ONVIF reboot per sustained single-camera capture failure."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["frigate", "onvif", "watchdog", "camera", "recovery"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: System Administrators",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Monitoring",
+]
+
+dependencies = [
+  "aiohttp>=3.12,<4",
+  "zeep>=4.3,<5",
+  "PyYAML>=6.0.2,<7",
+  "aiomqtt>=2.3,<4",
+  "httpx>=0.27,<1",
+  "packaging>=24",
+]
+
+[project.scripts]
+fwatch = "frigate_watchdog.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.26",
+  "pytest-cov>=6.1",
+  "hypothesis>=6.130",
+  "ruff>=0.12",
+  "mypy>=1.16",
+  "types-PyYAML>=6.0.2",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/frigate_watchdog"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE", "docs", "examples", "compose.yaml", "Dockerfile"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
+markers = [
+  "mqtt_broker: needs a Docker daemon to run a disposable mosquitto",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["frigate_watchdog", "tests/fakes"]
+omit = ["*/wsdl/*"]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@abstractmethod",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "A", "C4", "PIE", "RET", "SIM", "PTH", "RUF"]
+ignore = [
+  "S101",   # assert in tests is fine
+  "S104",   # binding to 127.0.0.1 in tests is fine
+  "S603",   # subprocess with known argv in tests
+  "SIM105", # contextlib.suppress is slower; keep try/except
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "RET", "SIM", "B008", "E501"]
+"src/frigate_watchdog/onvif.py" = ["S314"]  # XML parsing is hardened at the transport/parser layer
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/frigate_watchdog"]
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["zeep.*", "zeep.asyncio.*", "zeep.wsse.*", "aiomqtt.*"]
+ignore_missing_imports = true

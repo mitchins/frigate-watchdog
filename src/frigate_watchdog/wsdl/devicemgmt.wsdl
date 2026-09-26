@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Trimmed ONVIF Device Management WSDL for frigate-watchdog.
+
+  Covers exactly the three operations this appliance uses:
+    GetDeviceInformation (authenticated read-only preflight)
+    GetSystemDateAndTime (diagnosis only)
+    SystemReboot         (single recovery action)
+
+  Element names, namespaces, and SOAP 1.2 actions follow ONVIF
+  ver10 Device Service (http://www.onvif.org/ver10/device/wsdl).
+  This file is self-contained by design: no schema imports, so nothing is
+  ever downloaded at runtime.
+-->
+<wsdl:definitions name="DeviceService"
+    targetNamespace="http://www.onvif.org/ver10/device/wsdl"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+
+  <wsdl:types>
+    <xs:schema targetNamespace="http://www.onvif.org/ver10/device/wsdl"
+               elementFormDefault="qualified"
+               version="1.0">
+
+      <xs:element name="GetDeviceInformation">
+        <xs:complexType>
+          <xs:sequence/>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="GetDeviceInformationResponse">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Manufacturer" type="xs:string" minOccurs="0"/>
+            <xs:element name="Model" type="xs:string" minOccurs="0"/>
+            <xs:element name="FirmwareVersion" type="xs:string" minOccurs="0"/>
+            <xs:element name="SerialNumber" type="xs:string" minOccurs="0"/>
+            <xs:element name="HardwareId" type="xs:string" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="GetSystemDateAndTime">
+        <xs:complexType>
+          <xs:sequence/>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="GetSystemDateAndTimeResponse">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="SystemDateTime" minOccurs="0">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="DateTimeType" type="xs:string" minOccurs="0"/>
+                  <xs:element name="DaylightSavings" type="xs:boolean" minOccurs="0"/>
+                  <xs:element name="UTCDateTime" minOccurs="0">
+                    <xs:complexType>
+                      <xs:sequence>
+                        <xs:element name="Time">
+                          <xs:complexType>
+                            <xs:sequence>
+                              <xs:element name="Hour" type="xs:int"/>
+                              <xs:element name="Minute" type="xs:int"/>
+                              <xs:element name="Second" type="xs:int"/>
+                            </xs:sequence>
+                          </xs:complexType>
+                        </xs:element>
+                        <xs:element name="Date">
+                          <xs:complexType>
+                            <xs:sequence>
+                              <xs:element name="Year" type="xs:int"/>
+                              <xs:element name="Month" type="xs:int"/>
+                              <xs:element name="Day" type="xs:int"/>
+                            </xs:sequence>
+                          </xs:complexType>
+                        </xs:element>
+                      </xs:sequence>
+                    </xs:complexType>
+                  </xs:element>
+                </xs:sequence>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="SystemReboot">
+        <xs:complexType>
+          <xs:sequence/>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="SystemRebootResponse">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Message" type="xs:string"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+    </xs:schema>
+  </wsdl:types>
+
+  <wsdl:message name="GetDeviceInformationRequest">
+    <wsdl:part name="parameters" element="tds:GetDeviceInformation"/>
+  </wsdl:message>
+  <wsdl:message name="GetDeviceInformationResponse">
+    <wsdl:part name="parameters" element="tds:GetDeviceInformationResponse"/>
+  </wsdl:message>
+  <wsdl:message name="GetSystemDateAndTimeRequest">
+    <wsdl:part name="parameters" element="tds:GetSystemDateAndTime"/>
+  </wsdl:message>
+  <wsdl:message name="GetSystemDateAndTimeResponse">
+    <wsdl:part name="parameters" element="tds:GetSystemDateAndTimeResponse"/>
+  </wsdl:message>
+  <wsdl:message name="SystemRebootRequest">
+    <wsdl:part name="parameters" element="tds:SystemReboot"/>
+  </wsdl:message>
+  <wsdl:message name="SystemRebootResponse">
+    <wsdl:part name="parameters" element="tds:SystemRebootResponse"/>
+  </wsdl:message>
+
+  <wsdl:portType name="Device">
+    <wsdl:operation name="GetDeviceInformation">
+      <wsdl:documentation>Returns device information.</wsdl:documentation>
+      <wsdl:input message="tds:GetDeviceInformationRequest"/>
+      <wsdl:output message="tds:GetDeviceInformationResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="GetSystemDateAndTime">
+      <wsdl:documentation>Returns the device date and time.</wsdl:documentation>
+      <wsdl:input message="tds:GetSystemDateAndTimeRequest"/>
+      <wsdl:output message="tds:GetSystemDateAndTimeResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="SystemReboot">
+      <wsdl:documentation>Reboots the device.</wsdl:documentation>
+      <wsdl:input message="tds:SystemRebootRequest"/>
+      <wsdl:output message="tds:SystemRebootResponse"/>
+    </wsdl:operation>
+  </wsdl:portType>
+
+  <wsdl:binding name="DeviceBinding" type="tds:Device">
+    <soap12:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="GetDeviceInformation">
+      <soap12:operation soapAction="http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation"/>
+      <wsdl:input><soap12:body use="literal"/></wsdl:input>
+      <wsdl:output><soap12:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="GetSystemDateAndTime">
+      <soap12:operation soapAction="http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime"/>
+      <wsdl:input><soap12:body use="literal"/></wsdl:input>
+      <wsdl:output><soap12:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="SystemReboot">
+      <soap12:operation soapAction="http://www.onvif.org/ver10/device/wsdl/SystemReboot"/>
+      <wsdl:input><soap12:body use="literal"/></wsdl:input>
+      <wsdl:output><soap12:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+
+  <wsdl:service name="DeviceService">
+    <wsdl:port name="DevicePort" binding="tds:DeviceBinding">
+      <soap12:address location="http://127.0.0.1/onvif/device_service"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>

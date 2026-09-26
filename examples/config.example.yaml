@@ -1,0 +1,61 @@
+schema_version: 1
+
+# Observe is the default: the watchdog reports what it would do, but never
+# reboots a camera. Switch to "recover" only after commissioning.
+mode: observe
+
+# instance: default   # identifies this deployment in MQTT topics
+
+frigate:
+  base_url: http://frigate:5000
+  auth:
+    mode: none
+  # Native Frigate authentication (port 8971) instead:
+  # base_url: https://frigate.example.internal:8971
+  # auth:
+  #   mode: frigate
+  #   username: watchdog
+  #   password_env: FRIGATE_WATCHDOG_PASSWORD
+  #   # ca_bundle: /config/frigate-ca.pem   # optional private CA
+
+cameras:
+  porch:
+    frigate_name: Porch          # exact, case-sensitive Frigate camera name
+    recovery: onvif
+    onvif:
+      endpoint: http://192.168.10.40/onvif/device_service
+      username: admin
+      password_env: CAMERA_PORCH_PASSWORD
+
+  driveway:
+    frigate_name: Driveway
+    recovery: onvif
+    onvif:
+      endpoint: http://192.168.10.41/onvif/device_service
+      username: admin
+      password_env: CAMERA_DRIVEWAY_PASSWORD
+
+  # A witness-only camera: watched, never rebooted.
+  doorbell:
+    frigate_name: Doorbell
+    recovery: none
+    # maintenance: true   # temporarily exclude during known work
+
+mqtt:
+  enabled: false
+  # host: mqtt.example.internal
+  # port: 1883
+  # username: frigate-watchdog
+  # password_env: MQTT_PASSWORD
+  # topic_prefix: frigate-watchdog
+
+http:
+  enabled: true
+  host: 127.0.0.1   # loopback inside the container; publishing is opt-in
+  port: 8080
+
+# Timing overrides are optional; conservative defaults apply. The hourly
+# minimum between attempts and the 3-per-24h budget are not configurable.
+# timings:
+#   zero_frames_threshold_s: 120
+#   min_bad_snapshots: 6
