@@ -47,8 +47,10 @@ class MqttReporter:
         self.dropped_events = 0
         self.published_events = 0
         # Stable ids per logical event (same object -> same id), so broker
-        # redelivery and deliberate republication stay identifiable.
-        self._event_ids: dict[int, str] = {}
+        # redelivery and deliberate republication stay identifiable. The event
+        # itself is retained so CPython can never reuse its id() address while
+        # the entry exists.
+        self._event_ids: dict[int, tuple[Event, str]] = {}
         self._event_id_counter = 0
         self.connected = False
         self.last_error: str | None = None
@@ -88,8 +90,12 @@ class MqttReporter:
     async def stop(self) -> None:
         self._stop.set()
         if self._task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
                 await asyncio.wait_for(self._task, timeout=5)
+            if not self._task.done():
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                    await asyncio.wait_for(self._task, timeout=5)
             self._task = None
 
     # ---- consumer side ----
@@ -117,6 +123,9 @@ class MqttReporter:
                     await client.publish(self.topic_availability, b"online", qos=1, retain=True)
                     await self._drain(client)
                 self.connected = False
+            except (asyncio.CancelledError, TimeoutError):
+                self.connected = False
+                raise
             except Exception as exc:  # reconnect on anything
                 self.connected = False
                 self.last_error = type(exc).__name__
@@ -139,13 +148,16 @@ class MqttReporter:
             if isinstance(item, Event):
                 payload = item.as_dict()
                 key = id(item)
-                event_id = self._event_ids.get(key)
-                if event_id is None:
+                cached = self._event_ids.get(key)
+                if cached is not None and cached[0] is item:
+                    event_id = cached[1]
+                else:
                     self._event_id_counter += 1
                     event_id = f"{self.instance}-ev{self._event_id_counter}"
-                    if len(self._event_ids) > 1000:
-                        self._event_ids.clear()  # bound memory; old events are gone
-                    self._event_ids[key] = event_id
+                    while len(self._event_ids) >= 1000:
+                        # Evict oldest; the strong ref goes with it.
+                        self._event_ids.pop(next(iter(self._event_ids)))
+                    self._event_ids[key] = (item, event_id)
                 payload["id"] = event_id
                 await client.publish(
                     self.topic_events, json.dumps(payload, default=str).encode(), qos=1
@@ -159,6 +171,8 @@ class MqttReporter:
                     self.topic_state, json.dumps(body, default=str).encode(), qos=1, retain=True
                 )
         except aiomqtt.MqttError:
+            raise
+        except (asyncio.CancelledError, TimeoutError):
             raise
         except Exception:  # pragma: no cover - defensive
             logger.debug("mqtt publish failed", exc_info=True)

@@ -83,9 +83,13 @@ class FakeStore:
             )
 
     def reserve_attempt(self, camera: str) -> str:
+        from frigate_watchdog.store import StoreError
+
         inc = self.incidents.get(camera)
-        if inc is None:
+        if inc is None or inc.resolved:
             inc = self.open_incident(camera)
+        elif inc.latched:
+            raise StoreError("refusing to reserve: this outage already consumed its attempt")
         self.incidents[camera] = FakeIncident(inc.incident_id, camera, latched=True)
         attempt_id = f"att-{next(self._ids)}"
         self.attempts.append((camera, self.acc, None))

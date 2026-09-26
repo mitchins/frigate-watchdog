@@ -12,7 +12,6 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
-import string
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,7 +29,6 @@ from .constants import (
 _CAMERA_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ALLOWED_TIMING_KEYS = frozenset(TIMING_BOUNDS)
-_SAFE_ENV_CHARS = frozenset(string.ascii_letters + string.digits + "_-./@:+, ")
 
 
 class ConfigError(ValueError):
@@ -70,10 +68,7 @@ class Secret:
 
 def scrub(text: str) -> str:
     """Best-effort scrub of anything that looks like a credential from a message."""
-    out: list[str] = []
-    for ch in text:
-        out.append(ch if ch in _SAFE_ENV_CHARS else "?")
-    return "".join(out)
+    return "".join(ch if ch.isprintable() else "?" for ch in text)
 
 
 class _StrictLoader(yaml.SafeLoader):

@@ -9,7 +9,8 @@ The contract is frozen against Frigate 0.18.0 semantics:
 * ``GET /api/config`` returns the running config including
   ``cameras.<name>.enabled``; credential redaction upstream means we must
   never rely on stream URLs being present.
-* ``POST /login`` with JSON ``{"user","password"}`` returns a bearer token;
+* ``POST /api/login`` with JSON ``{"user","password"}`` sets the JWT in the
+  ``frigate_token`` response cookie and returns a message-only JSON body;
   wrong credentials give 401; tokens expire and then reads give 401.
 """
 
@@ -61,7 +62,6 @@ class FakeFrigate:
         app = web.Application()
         app.router.add_get("/api/stats", self._stats)
         app.router.add_get("/api/config", self._config)
-        app.router.add_post("/login", self._login)
         app.router.add_post("/api/login", self._login)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
@@ -200,5 +200,7 @@ class FakeFrigate:
             s._token_counter += 1
             token = f"fake-jwt-{s._token_counter}"
             s._tokens[token] = time.monotonic() + s.token_ttl_s
-            return web.json_response({"token": token, "user": user})
+            response = web.json_response({"message": "login successful"})
+            response.set_cookie("frigate_token", token, httponly=True, samesite="Lax")
+            return response
         return web.json_response({"error": "invalid credentials"}, status=401)

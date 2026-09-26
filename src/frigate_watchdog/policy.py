@@ -578,6 +578,25 @@ class DecisionEngine:
                 self.in_flight = None
             return
 
+        if (
+            rt.incident_id is not None
+            and not rt.store_latched
+            and rt.state
+            not in (
+                CameraState.BOOT_GRACE,
+                CameraState.LATCHED,
+                CameraState.RECOVERY_PENDING,
+                CameraState.RECOVERED,
+            )
+            and rt.healthy_since is not None
+            and snapshot.received_at - rt.healthy_since >= self.t["recovery_confirm_s"]
+        ):
+            # A transient blip opened an incident but frames returned without
+            # any attempt: resolve it so stale open incidents never linger.
+            decision.store_ops.append(
+                StoreOp("resolve_incident", camera=key, incident_id=rt.incident_id)
+            )
+            rt.incident_id = None
         if rt.state is CameraState.RECOVERED:
             rt.state = CameraState.HEALTHY if rt.store_armed else CameraState.UNARMED
             rt.incident_id = None

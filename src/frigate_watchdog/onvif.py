@@ -266,10 +266,17 @@ class OnvifClient:
             return OnvifResult("OK", detail="camera reported no clock")
         time_part = getattr(utc, "Time", None)
         date_part = getattr(utc, "Date", None)
+
+        def _field(obj: Any, name: str, width: int) -> str:
+            raw = getattr(obj, name, None)
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return "?" * width if width <= 2 else "????"
+            return f"{raw:0{width}d}"
+
         clock = (
-            f"{getattr(date_part, 'Year', '?'):04d}-{getattr(date_part, 'Month', '?'):02d}-"
-            f"{getattr(date_part, 'Day', '?'):02d}T{getattr(time_part, 'Hour', '?'):02d}:"
-            f"{getattr(time_part, 'Minute', '?'):02d}:{getattr(time_part, 'Second', '?'):02d}Z"
+            f"{_field(date_part, 'Year', 4)}-{_field(date_part, 'Month', 2)}-"
+            f"{_field(date_part, 'Day', 2)}T{_field(time_part, 'Hour', 2)}:"
+            f"{_field(time_part, 'Minute', 2)}:{_field(time_part, 'Second', 2)}Z"
         )
         return OnvifResult("OK", detail=f"camera clock {clock}")
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from pathlib import Path
 
@@ -78,7 +79,7 @@ def test_missing_config_file(tmp_path):
 async def test_probe_read_only_against_fake(tmp_path, capsys):
     cam = FakeOnvifCamera()
     endpoint = await cam.start()
-    doc = dict(GOOD_CONFIG)
+    doc = copy.deepcopy(GOOD_CONFIG)
     doc["cameras"]["porch"]["onvif"]["endpoint"] = endpoint
     path = write_config(tmp_path, doc)
     try:
@@ -108,7 +109,7 @@ async def test_probe_witness_camera_has_no_onvif(tmp_path):
 async def test_probe_auth_failure(tmp_path):
     cam = FakeOnvifCamera(FakeOnvifState(password="other"))
     endpoint = await cam.start()
-    doc = dict(GOOD_CONFIG)
+    doc = copy.deepcopy(GOOD_CONFIG)
     doc["cameras"]["porch"]["onvif"]["endpoint"] = endpoint
     path = write_config(tmp_path, doc)
     try:
@@ -121,7 +122,7 @@ async def test_probe_auth_failure(tmp_path):
 def test_acknowledge_requires_stopped_service(tmp_path):
     from frigate_watchdog.store import data_dir_lock
 
-    doc = dict(GOOD_CONFIG)
+    doc = copy.deepcopy(GOOD_CONFIG)
     path = write_config(tmp_path, doc)
     data = tmp_path / "data"
     data.mkdir()

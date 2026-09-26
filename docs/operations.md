@@ -50,7 +50,7 @@ codes:
 | ---- | ------- |
 | `MODE_OBSERVE` | Running in observe mode |
 | `NOT_ARMED` | Camera never delivered a healthy baseline |
-| `TELEMETRY_STALE` | Stats are old, future-dated, or cached without a advancing producer timestamp |
+| `TELEMETRY_STALE` | Stats are old, future-dated, or cached without an advancing producer timestamp |
 | `STARTUP_GRACE_ACTIVE` | Watchdog just started |
 | `FRIGATE_RESTART_GRACE_ACTIVE` | Frigate uptime/last_updated moved backwards |
 | `MONITORING_INTERRUPTED` | Polling gap; evidence was cleared, limits were not |
@@ -67,7 +67,7 @@ codes:
 
 ## Persistence
 
-SQLite on `/data`. Safety records (basements, incidents, attempts, budgets)
+SQLite on `/data`. Safety records (baselines, incidents, attempts, budgets)
 are never pruned with display history.
 
 Limits use an **accumulated-runtime** clock: only time the process is running

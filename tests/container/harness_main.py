@@ -157,7 +157,8 @@ async def main() -> None:
         for expected in ("action_reserved", "action_outcome", "recovery_confirmed"):
             assert expected in kinds, f"history missing {expected}: {kinds}"
         blob = json.dumps(history)
-        assert "cam-pass" not in blob, "credentials leaked into history"
+        assert "test-porch-pass" not in blob, "porch credential leaked into history"
+        assert "test-drive-pass" not in blob, "driveway credential leaked into history"
 
         # 6. MQTT outputs (availability/state/events)
         await asyncio.sleep(5)

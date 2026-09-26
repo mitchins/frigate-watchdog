@@ -10,9 +10,11 @@ Hard rules implemented here:
   rejected without reading them fully.
 * Redirects are never followed, and HTML login pages are rejected, so an
   auth wall can never be mistaken for telemetry.
-* Native Frigate login (POST /login, JWT) is held in memory only. One
-  controlled re-authentication and read retry per request on 401; repeated
-  login failures back off — no login storm.
+* Native Frigate login (POST /api/login, JWT in the ``frigate_token``
+  cookie with a JSON ``token`` field as fallback) is held in memory only.
+  One controlled re-authentication and read retry per request on 401;
+  repeated credential rejections back off — no login storm. Transport
+  failures never count toward that backoff.
 * TLS verification stays on; an optional CA bundle is the only knob.
 """
 
@@ -39,6 +41,24 @@ LOGIN_FAILURES_BEFORE_BACKOFF = 2
 
 class FrigateClientError(RuntimeError):
     pass
+
+
+def _login_problem(exc: FrigateClientError) -> str:
+    """Map a login failure to a stable fetch problem code.
+
+    Credential rejections stay ``auth`` (or ``auth_backoff`` while backed
+    off); transport failures keep their real code so a down Frigate is never
+    reported as an auth problem.
+    """
+    message = str(exc)
+    if "auth_backoff" in message:
+        return "auth_backoff"
+    if message.startswith("login_failed:"):
+        code = message.removeprefix("login_failed:")
+        if code in ("auth", "http_401", "http_403"):
+            return "auth"
+        return code or "auth"
+    return "auth"
 
 
 @dataclass(frozen=True)
@@ -138,23 +158,8 @@ class FrigateClient:
 
     # ---------------------------------------------------------------- login
 
-    async def _login(self) -> str:
-        """Return a fresh bearer token, or raise FrigateClientError."""
-        auth = self.config.auth
-        if auth.mode != "frigate" or auth.username is None or auth.password is None:
-            raise FrigateClientError("login requested but frigate auth is not configured")
-        now = time.monotonic()
-        if now < self._login_blocked_until:
-            raise FrigateClientError("auth_backoff")
-        status, body, problem = await self._read_json(
-            "POST",
-            "/login",
-            data={"user": auth.username, "password": auth.password.value},
-        )
-        if status == 200 and body is not None and isinstance(body.get("token"), str):
-            self._consecutive_login_failures = 0
-            self._token = str(body["token"])
-            return self._token
+    def _note_credential_rejection(self, now: float, detail: str) -> None:
+        """Count a 401/403 toward login backoff; nothing else backs off."""
         self._consecutive_login_failures += 1
         if self._consecutive_login_failures >= LOGIN_FAILURES_BEFORE_BACKOFF:
             backoff = min(
@@ -164,12 +169,82 @@ class FrigateClient:
             self._login_blocked_until = now + backoff
             logger.warning(
                 "frigate login failed (%s); backing off logins for %.0fs",
-                problem or status,
+                detail,
                 backoff,
             )
-        raise FrigateClientError(f"login_failed:{problem or status}")
+
+    async def _login(self) -> str:
+        """Return a fresh bearer token, or raise FrigateClientError.
+
+        Raises ``auth_backoff`` while credential backoff is active, else
+        ``login_failed:<code>`` where ``<code>`` is the stable problem code
+        (``auth`` for credential rejection, ``unreachable``/``timeout``/… for
+        transport failures). Only 401/403 count toward backoff.
+        """
+        auth = self.config.auth
+        if auth.mode != "frigate" or auth.username is None or auth.password is None:
+            raise FrigateClientError("login requested but frigate auth is not configured")
+        now = time.monotonic()
+        if now < self._login_blocked_until:
+            raise FrigateClientError("auth_backoff")
+        if self._session is None:
+            raise FrigateClientError("login_failed:not_started")
+        url = f"{self.base_url}/api/login"
+        try:
+            async with self._session.request(
+                "POST",
+                url,
+                json={"user": auth.username, "password": auth.password.value},
+                headers={"Accept": "application/json"},
+                allow_redirects=False,
+            ) as response:
+                if 300 <= response.status < 400:
+                    raise FrigateClientError("login_failed:redirect")
+                if response.status in (401, 403):
+                    self._note_credential_rejection(now, f"http_{response.status}")
+                    raise FrigateClientError("login_failed:auth")
+                if response.status != 200:
+                    raise FrigateClientError(f"login_failed:http_{response.status}")
+                cookie = response.cookies.get("frigate_token")
+                cookie_token = cookie.value if cookie is not None else ""
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.content.iter_chunked(65536):
+                    total += len(chunk)
+                    if total > HTTP_MAX_RESPONSE_BYTES:
+                        raise FrigateClientError("login_failed:too_large")
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+                json_token = ""
+                if body.strip():
+                    ctype = response.headers.get("Content-Type", "")
+                    if "application/json" in ctype.lower():
+                        try:
+                            parsed = json.loads(body)
+                        except (ValueError, UnicodeDecodeError):
+                            raise FrigateClientError("login_failed:malformed") from None
+                        if isinstance(parsed, dict) and isinstance(parsed.get("token"), str):
+                            json_token = str(parsed["token"])
+                    # A message-only or empty body is fine when the cookie carried the JWT.
+                token = cookie_token.strip() or json_token
+                if not token:
+                    raise FrigateClientError("login_failed:malformed")
+                self._consecutive_login_failures = 0
+                self._token = token
+                return token
+        except FrigateClientError:
+            raise
+        except TimeoutError:
+            raise FrigateClientError("login_failed:timeout") from None
+        except (aiohttp.ClientError, OSError):
+            raise FrigateClientError("login_failed:unreachable") from None
 
     async def _ensure_token(self) -> str | None:
+        """Return a token, None while credential backoff is active.
+
+        Non-credential login failures raise with the real problem so the
+        fetch reports ``unreachable``/``timeout``/… instead of ``auth``.
+        """
         if self.config.auth.mode != "frigate":
             return None
         if self._token is not None:
@@ -177,10 +252,10 @@ class FrigateClient:
         try:
             return await self._login()
         except FrigateClientError as exc:
-            if "backoff" in str(exc):
+            message = str(exc)
+            if "auth_backoff" in message:
                 return None
-            # single login attempt failure surfaces as auth problem
-            return None
+            raise
 
     # ---------------------------------------------------------------- public
 
@@ -190,7 +265,10 @@ class FrigateClient:
         On a 401 in frigate-auth mode, performs exactly one re-login and one
         retry of the read. Anything else fails the fetch with a stable code.
         """
-        token = await self._ensure_token()
+        try:
+            token = await self._ensure_token()
+        except FrigateClientError as exc:
+            return FetchResult(None, None, _login_problem(exc))
         if self.config.auth.mode == "frigate" and token is None:
             return FetchResult(None, None, "auth_backoff")
 
@@ -201,8 +279,8 @@ class FrigateClient:
             # One controlled re-authentication, one retry.
             try:
                 token = await self._login()
-            except FrigateClientError:
-                return FetchResult(None, None, "auth")
+            except FrigateClientError as exc:
+                return FetchResult(None, None, _login_problem(exc))
             status, stats, problem = await self._read_json(
                 "GET", "/api/stats", token=token, authenticate=True
             )
@@ -220,8 +298,8 @@ class FrigateClient:
         if problem2 == "auth" and self.config.auth.mode == "frigate":
             try:
                 token = await self._login()
-            except FrigateClientError:
-                return FetchResult(None, None, "auth")
+            except FrigateClientError as exc:
+                return FetchResult(None, None, _login_problem(exc))
             _status2, config_doc, problem2 = await self._read_json(
                 "GET", "/api/config", token=token, authenticate=True
             )

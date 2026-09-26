@@ -39,19 +39,19 @@ from .store import Store, StoreError, endpoint_identity, frigate_identity
 logger = logging.getLogger("frigate_watchdog.service")
 
 # Events worth persisting to the bounded history (state changes and actions,
-# not every inhibition flutter).
+# not every inhibition flutter). incident_opened, action_reserved, and
+# action_outcome are recorded transactionally by Store.open_incident,
+# Store.reserve_attempt, and Store.record_outcome, so persisting them here
+# again would duplicate history rows.
 _PERSISTED_EVENT_KINDS = frozenset(
     {
         "armed",
         "frames_stopped",
         "frigate_restarted",
         "monitoring_interrupted",
-        "incident_opened",
         "inhibited",
         "action_proposed",
         "action_cancelled",
-        "action_reserved",
-        "action_outcome",
         "incident_latched",
         "incident_resolved",
         "recovery_confirmed",

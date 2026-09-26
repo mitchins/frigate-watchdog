@@ -212,6 +212,8 @@ async def test_reconnect_publishes_backlog():
         reporter.publish_event(event("frames_stopped"))
         reporter.publish_event(event("action_outcome"))
         reporter.start()
-        await asyncio.sleep(2.0)
+        deadline = time.monotonic() + 15
+        while reporter.published_events < 2 and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
         assert reporter.published_events == 2, "backlog must drain on connect"
         await reporter.stop()

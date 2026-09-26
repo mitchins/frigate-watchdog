@@ -177,15 +177,21 @@ def test_property_clock_jumps_never_earlier_eligibility(steps, seed):
     for step in steps:
         drift = rng.choice([-3600.0, -60.0, 0.0, 7200.0])
         _, porch, driveway, doorbell = step
-        h.poll(fps={"porch": porch, "driveway": driveway, "doorbell": doorbell}, utc_drift=drift)
+        result = h.poll(
+            fps={"porch": porch, "driveway": driveway, "doorbell": doorbell},
+            utc_drift=drift,
+        )
+        if result.decision.proposal is not None:
+            recorder.dispatch(h, result.decision.proposal.camera)
     elapsed_acc = h.store.acc - first_acc
     if len(recorder.sends) == 1 and elapsed_acc < 3600.0:
         # no second attempt inside the cooldown
         for _ in range(8):
-            h.poll(fps={"porch": 0.0, "driveway": 5.0, "doorbell": 5.0})
-        assert h.store.accounting("porch").attempts_in_window == 1, (
-            "cooldown defeated by wall-clock jumps"
-        )
+            result = h.poll(fps={"porch": 0.0, "driveway": 5.0, "doorbell": 5.0})
+            if result.decision.proposal is not None:
+                recorder.dispatch(h, result.decision.proposal.camera)
+        porch_sends = [s for s in recorder.sends if s[0] == "porch"]
+        assert len(porch_sends) == 1, "cooldown defeated by wall-clock jumps"
 
 
 @settings(max_examples=60, deadline=None, derandomize=True)

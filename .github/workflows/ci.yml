@@ -81,6 +81,7 @@ jobs:
       - name: Container qualification
         run: |
           mkdir -p tests/container/watchdog-data
+          sudo chown -R 1000:1000 tests/container/watchdog-data
           docker compose -f tests/container/compose.test.yaml up \
             --abort-on-container-exit --exit-code-from qualify --build
         env:

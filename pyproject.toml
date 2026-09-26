@@ -10,7 +10,6 @@ keywords = ["frigate", "onvif", "watchdog", "camera", "recovery"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: System Administrators",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.12",
   "Topic :: System :: Monitoring",
 ]
@@ -39,7 +38,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
