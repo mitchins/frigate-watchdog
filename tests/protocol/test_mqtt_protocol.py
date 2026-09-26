@@ -104,26 +104,41 @@ async def test_availability_lwt_and_retained_state():
         reporter.start()
         reporter.publish_event(event())
         reporter.publish_state({"mode": "recover", "cameras": {"porch": "SUSPECT"}})
-        await asyncio.sleep(1.5)
+        # Wait for the event publish: availability (retained) precedes it and
+        # state follows in the same drain, so both retained messages exist now.
+        deadline = time.monotonic() + 25
+        while reporter.published_events < 1 and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+        assert reporter.published_events >= 1, (
+            "reporter never published "
+            f"(connected={reporter.connected}, last_error={reporter.last_error})"
+        )
 
         import aiomqtt
 
-        # a fresh subscriber receives the retained availability and state
+        # a fresh subscriber receives the retained availability and state.
+        # The (non-retained) event may already be gone; only retained
+        # messages are asserted here.
         got: list[tuple[str, bytes]] = []
 
         async def subscriber():
-            async with aiomqtt.Client(hostname="127.0.0.1", port=port) as sub:
+            async with aiomqtt.Client(hostname="127.0.0.1", port=port, timeout=10) as sub:
                 await sub.subscribe("frigate-watchdog/test/#")
-                async with asyncio.timeout(3.0):
-                    async for message in sub.messages:
-                        got.append((str(message.topic), bytes(message.payload)))
-                        if len(got) >= 3:
-                            break
+                try:
+                    async with asyncio.timeout(10):
+                        async for message in sub.messages:
+                            got.append((str(message.topic), bytes(message.payload)))
+                            if len(got) >= 2:
+                                break
+                except TimeoutError:
+                    pass
 
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(subscriber(), timeout=6)
+        await asyncio.wait_for(subscriber(), timeout=20)
         topics = [t for t, _ in got]
-        assert "frigate-watchdog/test/availability" in topics
+        assert "frigate-watchdog/test/availability" in topics, (
+            f"no retained availability in {topics} "
+            f"(connected={reporter.connected}, last_error={reporter.last_error})"
+        )
         assert b"online" in [p for t, p in got if t.endswith("availability")]
         state = next(p for t, p in got if t.endswith("/state"))
         body = json.loads(state)
@@ -167,28 +182,38 @@ async def test_duplicate_event_delivery_is_identifiable():
         cfg = MqttConfig(enabled=True, host="127.0.0.1", port=port)
         reporter = MqttReporter(cfg, "test", "abcd1234")
         reporter.start()
+        deadline = time.monotonic() + 25
+        while not reporter.connected and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+        assert reporter.connected, f"reporter never connected (last_error={reporter.last_error})"
         received: list[bytes] = []
 
         import aiomqtt
 
         async def subscriber():
-            async with aiomqtt.Client(hostname="127.0.0.1", port=port) as sub:
+            async with aiomqtt.Client(hostname="127.0.0.1", port=port, timeout=10) as sub:
                 await sub.subscribe("frigate-watchdog/test/events")
-                async with asyncio.timeout(2.5):
-                    async for message in sub.messages:
-                        received.append(bytes(message.payload))
-                        if len(received) >= 2:
-                            break
+                try:
+                    async with asyncio.timeout(15):
+                        async for message in sub.messages:
+                            received.append(bytes(message.payload))
+                            if len(received) >= 2:
+                                break
+                except TimeoutError:
+                    pass
 
         sub_task = asyncio.create_task(subscriber())
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)  # let the subscription establish (events are not retained)
         # duplicate delivery of the same logical event
         e = event("frames_stopped")
         reporter.publish_event(e)
         reporter.publish_event(e)
-        await asyncio.wait_for(sub_task, timeout=6)
+        await asyncio.wait_for(sub_task, timeout=25)
         await reporter.stop()
-        assert len(received) >= 2
+        assert len(received) >= 2, (
+            f"only {len(received)} events received "
+            f"(connected={reporter.connected}, last_error={reporter.last_error})"
+        )
         first, second = json.loads(received[0]), json.loads(received[-1])
         assert first["id"] == second["id"], "duplicates must carry the same stable id"
 

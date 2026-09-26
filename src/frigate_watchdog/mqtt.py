@@ -104,12 +104,16 @@ class MqttReporter:
         backoff = RECONNECT_MIN_S
         while not self._stop.is_set():
             try:
+                # timeout bounds the CONNECT wait and QoS 1 acknowledgements;
+                # aiomqtt surfaces expiry as MqttError, which reconnects below.
+                # Without it a slow broker would wedge the reporter forever.
                 async with aiomqtt.Client(
                     hostname=self.config.host,
                     port=self.config.port,
                     username=self.config.username,
                     password=self.config.password.value if self.config.password else None,
                     identifier=self.client_id,
+                    timeout=10.0,
                     will=aiomqtt.Will(
                         topic=self.topic_availability,
                         payload=b"offline",
@@ -123,10 +127,10 @@ class MqttReporter:
                     await client.publish(self.topic_availability, b"online", qos=1, retain=True)
                     await self._drain(client)
                 self.connected = False
-            except (asyncio.CancelledError, TimeoutError):
+            except asyncio.CancelledError:
                 self.connected = False
                 raise
-            except Exception as exc:  # reconnect on anything
+            except Exception as exc:  # reconnect on anything, TimeoutError included
                 self.connected = False
                 self.last_error = type(exc).__name__
                 try:
