@@ -51,7 +51,11 @@ mqtt:
 
 http:
   enabled: true
-  host: 127.0.0.1   # loopback inside the container; publishing is opt-in
+  # In a container, bind all interfaces so a published port (Docker forwards
+  # to the container's eth0, not its loopback) can reach the status API.
+  # Restrict exposure on the Docker side, e.g. "127.0.0.1:8080:8080".
+  # For a non-containerised install, prefer 127.0.0.1.
+  host: 0.0.0.0
   port: 8080
 
 # Timing overrides are optional; conservative defaults apply. The hourly

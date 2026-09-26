@@ -138,6 +138,27 @@ def test_finding_8_preflight_failure_single_cancel_event():
     assert len(cancels) == 1
 
 
+def test_preflight_auth_failed_latches_without_consuming_attempt():
+    """Wrong ONVIF credentials at the read-only preflight must durably
+    auth-latch; no reservation happens, so no attempt is consumed."""
+    h = make_harness()
+    warm_up_healthy(h)
+    for _ in range(8):
+        h.poll(fps=healthy_fps(("porch",)))
+    assert h.total_proposals == 1
+    h.preflight_failed("porch", "AUTH_FAILED")
+    assert "porch" in h.store.auth_latches
+    assert h.store.attempts == [], "preflight auth failure must not consume an attempt"
+    assert not h.store.incident("porch").latched, "no send happened; no outage latch"
+    check = h.engine.evaluate_action(
+        "porch",
+        snapshot=h.engine.last_snapshot,
+        now_mono=h.clock.mono,
+        now_acc=h.store.acc,
+    )
+    assert any(f.code == "AUTH_LATCHED" for f in check.failures)
+
+
 def test_finding_9_bad_keys_capped():
     h = make_harness()
     warm_up_healthy(h)

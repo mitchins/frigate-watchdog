@@ -31,8 +31,10 @@ that version). Works with stock Frigate regardless of detector.
    identities; `frigate_name` must match Frigate **exactly** (case-sensitive).
    ONVIF endpoints must be explicit IP addresses.
 
-2. Put camera passwords in the environment (`CAMERA_PORCH_PASSWORD`, …).
-   Empty values are treated as missing.
+2. Copy [`examples/.env.watchdog.example`](examples/.env.watchdog.example) to
+   `.env.watchdog` next to `compose.yaml` and fill in one variable per
+   `password_env` name used in your config. Empty values are treated as
+   missing.
 
 3. Deploy with the canonical Compose file. The data volume is the safety
    record — do not throw it away.
@@ -44,7 +46,8 @@ that version). Works with stock Frigate regardless of detector.
 ```sh
 mkdir -p config data
 cp examples/config.example.yaml config/config.yaml
-# edit config/config.yaml; export CAMERA_*_PASSWORD
+cp examples/.env.watchdog.example .env.watchdog
+# edit config/config.yaml and .env.watchdog
 docker compose up -d
 ```
 
@@ -58,6 +61,11 @@ uncomment the loopback mapping in `compose.yaml`:
 ports:
   - "127.0.0.1:8080:8080"
 ```
+
+The example config binds `0.0.0.0` **inside** the container (Docker forwards
+published ports to the container's eth0, not its loopback); the host-side
+`127.0.0.1` in the mapping is what restricts exposure. A non-containerised
+install should bind `127.0.0.1` directly.
 
 Then:
 
@@ -99,7 +107,9 @@ There is no reboot HTTP endpoint and no remote acknowledgement API.
 2. Wait until every camera has an established healthy baseline (`armed` in `/stats`).
 3. `fwatch probe CAMERA` — read-only ONVIF check. Never reboots.
 4. Inspect `/stats` inhibition reasons under a real outage (or wait).
-5. Authorise **one** controlled reboot of **one** verified camera.
+5. Perform **one** controlled reboot of **one** verified camera
+   **out-of-band** — power-cycle it or use the vendor app. The watchdog has
+   no command for this; `fwatch probe` is read-only by design.
 6. Confirm real frames return in Frigate.
 7. Set `mode: recover` for that camera only; expand only to verified targets.
 

@@ -142,6 +142,8 @@ Unsupported. A local lock does not coordinate independent installations.
 1. Observe mode, persistent `/data`.
 2. All cameras `armed`.
 3. `fwatch probe` each ONVIF target.
-4. Owner authorises one reboot of one camera.
+4. Owner performs one controlled reboot of one camera **out-of-band**
+   (power-cycle or vendor UI). The watchdog itself has no reboot command;
+   `fwatch probe` is read-only by design.
 5. Confirm Frigate frames return.
 6. `mode: recover` for verified targets only.

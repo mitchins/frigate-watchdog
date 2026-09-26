@@ -13,4 +13,5 @@ data/
 .hypothesis/
 hypothesis/
 .DS_Store
+.env.watchdog
 tests/container/watchdog-data/

@@ -31,12 +31,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --frozen --group dev
-      - run: uv run pytest tests/unit tests/protocol tests/integration --cov=frigate_watchdog --cov-branch --cov-report=term --cov-fail-under=85
+      - run: uv run pytest tests/unit tests/protocol tests/integration --cov=frigate_watchdog --cov-branch --cov-report=term --cov-report=xml:coverage.xml --cov-fail-under=85
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
           name: coverage
-          path: .coverage
+          path: coverage.xml
           if-no-files-found: ignore
 
   secrets:

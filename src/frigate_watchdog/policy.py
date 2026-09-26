@@ -1089,9 +1089,27 @@ class DecisionEngine:
         now_mono: float,
         now_utc: float,
     ) -> EngineDecision:
-        """A dispatch preflight failed *before* reservation; back off."""
+        """A dispatch preflight failed *before* reservation; back off.
+
+        A credential rejection during the read-only preflight durably
+        auth-latches the camera (operator must correct and acknowledge).
+        No attempt is reserved or consumed: nothing was sent.
+        """
         decision = EngineDecision()
         rt = self.cameras.get(camera)
+        if code == "AUTH_FAILED":
+            decision.store_ops.append(StoreOp("auth_latch", camera=camera))
+            decision.events.append(
+                self._event(
+                    "inhibited",
+                    now_mono,
+                    now_utc,
+                    camera=camera,
+                    reason=R_AUTH_LATCHED,
+                    detail="credentials rejected by read-only preflight; "
+                    "latched until acknowledged",
+                )
+            )
         if rt is not None:
             rt.preflight_backoff_until = now_mono + PREFLIGHT_BACKOFF_S
         cancelled = self._cancel_in_flight(

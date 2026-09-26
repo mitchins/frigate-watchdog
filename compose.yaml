@@ -1,15 +1,20 @@
-# Canonical frigate-watchdog deployment.
+# Canonical frigate-watchdog deployment using the published image.
 #
 # The watchdog only initiates outbound connections (Frigate API, camera ONVIF
 # endpoints, optional MQTT). It needs no Docker socket, no device access, no
 # host networking, and publishes no ports by default. To inspect /health,
 # /stats, /history from the host, uncomment the loopback port mapping — it
 # binds to 127.0.0.1 only, never all interfaces.
+#
+# Credentials come from .env.watchdog (see examples/.env.watchdog.example):
+# every password_env name used in config/config.yaml must be defined there.
 
 services:
   watchdog:
-    build: .
-    image: frigate-watchdog:local
+    # Released appliance image. Pin a version for reproducible deployments,
+    # e.g. ghcr.io/mitchins/frigate-watchdog:0.1.0. To run from source
+    # instead, replace with: build: .
+    image: ${WATCHDOG_IMAGE:-ghcr.io/mitchins/frigate-watchdog:latest}
     restart: unless-stopped
     user: "1000:1000"
     read_only: true
@@ -23,12 +28,9 @@ services:
       - ./data:/data
       # Read-only configuration.
       - ./config:/config:ro
+    env_file:
+      - .env.watchdog
     environment:
-      # Resolve every *_password_env from the configured credentials.
-      CAMERA_PORCH_PASSWORD: ${CAMERA_PORCH_PASSWORD:?set in your environment}
-      # CAMERA_DRIVEWAY_PASSWORD: ${CAMERA_DRIVEWAY_PASSWORD:?}
-      # FRIGATE_WATCHDOG_PASSWORD: ${FRIGATE_WATCHDOG_PASSWORD:-}
-      # MQTT_PASSWORD: ${MQTT_PASSWORD:-}
       TZ: ${TZ:-Etc/UTC}
     deploy:
       resources:
@@ -36,7 +38,8 @@ services:
           memory: 256M
           pids: 100
           cpus: "0.50"
-    # Optional local status surface (loopback only):
+    # Optional local status surface (loopback on the host only; the container
+    # itself binds 0.0.0.0 — see examples/config.example.yaml):
     # ports:
     #   - "127.0.0.1:8080:8080"
     logging:

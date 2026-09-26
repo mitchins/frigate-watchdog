@@ -284,6 +284,58 @@ async def test_second_service_process_refuses_data_dir(tmp_path):
         await frigate.stop()
 
 
+async def test_health_reports_broken_decision_loop(tmp_path):
+    """A coordinator that throws every iteration is a broken process:
+    /health must go 503 after consecutive failures and recover when the
+    loop succeeds again. External failures must not trigger this."""
+    frigate = FakeFrigate()
+    base = await frigate.start()
+    config = fast_config(
+        frigate_base=base,
+        onvif_endpoints={"porch": "http://127.0.0.1:1/onvif", "driveway": "none"},
+        mode="observe",
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    stop = asyncio.Event()
+    service = WatchdogService(config, data, shutdown=stop)
+    real_poll = service._poll_and_process
+
+    async def exploding_poll(now_mono: float) -> None:
+        raise RuntimeError("injected coordinator defect")
+
+    service._poll_and_process = exploding_poll  # type: ignore[method-assign]
+    run_task = asyncio.create_task(service.run())
+
+    try:
+        await wait_until(lambda: service.health.http_port is not None, timeout=10)
+        await wait_until(lambda: service.health.consecutive_loop_failures >= 3, timeout=15)
+        status, body = await asyncio.to_thread(_fetch_health, service.health.http_port)
+        assert status == 503
+        assert body["status"] == "dead"
+        assert body["consecutive_loop_failures"] >= 3
+
+        # the defect is fixed: the loop succeeds again and health recovers
+        service._poll_and_process = real_poll  # type: ignore[method-assign]
+        await wait_until(lambda: service.health.consecutive_loop_failures == 0, timeout=15)
+        status, body = await asyncio.to_thread(_fetch_health, service.health.http_port)
+        assert status == 200
+        assert body["status"] == "alive"
+    finally:
+        stop.set()
+        await asyncio.wait_for(run_task, timeout=10)
+        await frigate.stop()
+
+
+def _fetch_health(port: int) -> tuple[int, dict]:
+    url = f"http://127.0.0.1:{port}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode())
+
+
 async def _history(service) -> dict:
     return await http_get(service.health.http_port, "/history?limit=200")
 

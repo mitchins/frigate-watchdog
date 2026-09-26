@@ -135,3 +135,27 @@ async def test_health_dead_when_loop_stopped():
     async with TestClient(TestServer(app)) as client:
         r = await client.get("/health")
         assert r.status == 503
+
+
+def test_loop_alive_degrades_only_after_consecutive_failures():
+    snapshot = HealthSnapshot(0.2)
+    snapshot.last_loop_activity_mono = time.monotonic()
+    snapshot.consecutive_loop_failures = 2  # transient: still alive
+    assert snapshot.loop_alive()
+    snapshot.consecutive_loop_failures = 3  # broken loop
+    assert not snapshot.loop_alive()
+    snapshot.consecutive_loop_failures = 0  # a success resets the streak
+    assert snapshot.loop_alive()
+
+
+async def test_health_dead_after_consecutive_loop_failures():
+    snapshot = HealthSnapshot(0.2)
+    snapshot.last_loop_activity_mono = time.monotonic()
+    snapshot.consecutive_loop_failures = 3
+    app = build_app(snapshot, lambda: None, None)
+    async with TestClient(TestServer(app)) as client:
+        r = await client.get("/health")
+        assert r.status == 503
+        body = await r.json()
+        assert body["status"] == "dead"
+        assert body["consecutive_loop_failures"] == 3

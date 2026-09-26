@@ -21,6 +21,12 @@ from . import __version__
 from .policy import DecisionEngine
 from .store import Store, StoreError
 
+# A decision loop that throws this many iterations in a row is broken, not
+# merely unlucky; /health then reports 503. External failures (Frigate down,
+# camera unreachable, MQTT gone) flow through problem codes and must never
+# count here.
+LOOP_FAILURE_THRESHOLD = 3
+
 
 class HealthSnapshot:
     """Live process state the HTTP server reads (single event loop)."""
@@ -30,6 +36,7 @@ class HealthSnapshot:
         self.started_mono = time.monotonic()
         self.started_utc = time.time()
         self.last_loop_activity_mono: float | None = None
+        self.consecutive_loop_failures = 0
         self.loop_stopped = False
         self.store_ok = True
         self.store_error: str | None = None
@@ -40,6 +47,8 @@ class HealthSnapshot:
     def loop_alive(self) -> bool:
         if self.loop_stopped or self.last_loop_activity_mono is None:
             return not self.loop_stopped
+        if self.consecutive_loop_failures >= LOOP_FAILURE_THRESHOLD:
+            return False
         return (time.monotonic() - self.last_loop_activity_mono) < 3 * max(
             self.poll_interval_s, 10.0
         )
@@ -59,6 +68,7 @@ def build_app(
             "version": __version__,
             "uptime_s": round(time.monotonic() - snapshot.started_mono, 1),
             "store_ok": snapshot.store_ok,
+            "consecutive_loop_failures": snapshot.consecutive_loop_failures,
         }
         return web.json_response(payload, status=200 if alive else 503)
 

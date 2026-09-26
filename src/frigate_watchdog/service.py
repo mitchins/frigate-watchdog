@@ -238,7 +238,12 @@ class WatchdogService:
                 started = time.monotonic()
                 try:
                     await self._iterate()
+                    self.health.consecutive_loop_failures = 0
                 except Exception:
+                    # A repeatedly throwing coordinator is a broken process:
+                    # count it so /health can report dead. External failures
+                    # (Frigate/camera/MQTT) are problem codes, not exceptions.
+                    self.health.consecutive_loop_failures += 1
                     logger.exception("coordinator iteration failed")
                 self.health.last_loop_activity_mono = time.monotonic()
                 elapsed = time.monotonic() - started
