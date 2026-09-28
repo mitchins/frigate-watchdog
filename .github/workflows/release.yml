@@ -1,5 +1,16 @@
 name: Release
 
+# Build once, qualify the exact published digest, then promote that digest.
+#
+#   source   -> lint, types, tests, tag/version agreement
+#   build    -> multi-arch image pushed to a staging tag; digest recorded
+#   qualify  -> amd64: pull by digest, runtime checks + container qualification
+#   smoke    -> arm64: pull by digest, runtime checks
+#   promote  -> retag the qualified digest; GitHub (pre-)release
+#
+# A tag with a pre-release suffix (v0.1.0-rc.1) is promoted to its own tag
+# only. A final tag (v0.1.0) also receives v0, v0.1 and latest.
+
 on:
   push:
     tags:
@@ -9,24 +20,40 @@ permissions:
   contents: read
 
 jobs:
-  qualify:
-    name: test the tag
+  source:
+    name: qualify source
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
+      - name: Tag matches project version
+        run: |
+          set -eu
+          project="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)"
+          tag="${GITHUB_REF_NAME#v}"
+          base="${tag%%-*}"
+          if [ "$base" != "$project" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match pyproject version ${project}" >&2
+            exit 1
+          fi
       - run: uv sync --frozen --group dev
+      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests
+      - run: uv run mypy
       - run: uv run pytest tests/unit tests/protocol tests/integration --cov=frigate_watchdog --cov-branch --cov-fail-under=85
 
-  publish:
-    name: publish image
-    needs: qualify
+  build:
+    name: build + push staging image
+    needs: source
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
@@ -35,27 +62,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Tags
-        id: tags
-        run: |
-          set -eu
-          TAG="${GITHUB_REF_NAME}"
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
-          {
-            echo "list<<EOF"
-            echo "${IMAGE}:${TAG}"
-            if echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-              echo "${IMAGE}:$(echo "$TAG" | cut -d. -f1)"
-              echo "${IMAGE}:$(echo "$TAG" | cut -d. -f1-2)"
-              echo "${IMAGE}:latest"
-            fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
+      - name: Image reference
+        id: ref
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Build and push (staging tag only)
+        id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
@@ -63,6 +74,111 @@ jobs:
           push: true
           sbom: true
           provenance: mode=max
-          tags: ${{ steps.tags.outputs.list }}
+          tags: ${{ steps.ref.outputs.image }}:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  qualify:
+    name: qualify published image (amd64)
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    env:
+      WATCHDOG_IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker pull "$WATCHDOG_IMAGE"
+      - name: Image starts and loads runtime
+        run: |
+          docker run --rm --entrypoint python "$WATCHDOG_IMAGE" -c \
+            "from frigate_watchdog.onvif import DEVICE_WSDL; from frigate_watchdog import __version__; assert DEVICE_WSDL.exists(); print(__version__)"
+          docker run --rm --read-only --user 1000:1000 --tmpfs /tmp:size=16m \
+            --entrypoint fwatch "$WATCHDOG_IMAGE" --help
+      - name: No test fixtures in the image
+        run: |
+          if docker run --rm --entrypoint sh "$WATCHDOG_IMAGE" -c 'test -d /app/tests || test -d /repo/tests'; then
+            echo "test fixtures must not ship in the release image" >&2
+            exit 1
+          fi
+      - name: Container qualification against the published digest
+        run: |
+          mkdir -p tests/container/watchdog-data
+          sudo chown -R 1000:1000 tests/container/watchdog-data
+          docker compose -f tests/container/compose.test.yaml up \
+            --abort-on-container-exit --exit-code-from qualify --build
+        env:
+          COMPOSE_PARALLEL_LIMIT: "4"
+
+  smoke-arm64:
+    name: smoke published image (arm64)
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: read
+    env:
+      WATCHDOG_IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker pull "$WATCHDOG_IMAGE"
+      - run: |
+          docker run --rm --entrypoint python "$WATCHDOG_IMAGE" -c \
+            "from frigate_watchdog.onvif import DEVICE_WSDL; assert DEVICE_WSDL.exists(); import aiohttp, zeep, yaml, aiomqtt, httpx"
+          docker run --rm --entrypoint fwatch "$WATCHDOG_IMAGE" --help
+
+  promote:
+    name: promote qualified digest
+    needs: [build, qualify, smoke-arm64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Retag the qualified digest
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          set -- -t "${IMAGE}:${TAG}"
+          if echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            set -- "$@" \
+              -t "${IMAGE}:$(echo "$TAG" | cut -d. -f1)" \
+              -t "${IMAGE}:$(echo "$TAG" | cut -d. -f1-2)" \
+              -t "${IMAGE}:latest"
+          fi
+          docker buildx imagetools create "$@" "${IMAGE}@${DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:${TAG}"
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          flags=""
+          case "$TAG" in *-*) flags="--prerelease" ;; esac
+          notes="Image: \`${IMAGE}:${TAG}\`
+
+          Digest: \`${IMAGE}@${DIGEST}\`
+
+          This digest passed container qualification (amd64) and smoke (arm64) after being pulled from GHCR."
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+            --notes "$notes" --verify-tag $flags

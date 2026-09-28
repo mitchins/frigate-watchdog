@@ -33,7 +33,8 @@ services:
     command: ["mosquitto", "-c", /mosquitto-no-auth.conf]
 
   watchdog:
-    image: frigate-watchdog:local
+    # The release workflow sets WATCHDOG_IMAGE to the published digest.
+    image: ${WATCHDOG_IMAGE:-frigate-watchdog:local}
     restart: "no"
     user: "1000:1000"
     read_only: true
