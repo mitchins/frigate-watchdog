@@ -7,8 +7,11 @@ engine returns state transitions, events, and proposed actions.
 Invariants enforced here (and adversarially tested):
 
 * No action is proposed without complete, fresh, distinct-snapshot evidence.
-* No action is proposed while two or more enabled cameras are failing.
 * No action is proposed without at least one stably-healthy peer.
+* While several cameras fail, they are recovered one at a time: the next
+  proposal waits until the previous camera's recovery is confirmed (or its
+  boot grace ends), and phasing halts once an attempt has left its camera
+  latched, because a reboot that did not help points away from the cameras.
 * A latched outage never receives a second attempt; only a full
   healthy-confirmation interval or an operator acknowledgement clears it.
 * Every guard is re-evaluated at dispatch time; stale proposals cancel.
@@ -80,6 +83,7 @@ R_STARTUP_GRACE = "STARTUP_GRACE_ACTIVE"
 R_FRIGATE_RESTART_GRACE = "FRIGATE_RESTART_GRACE_ACTIVE"
 R_MONITORING_INTERRUPTED = "MONITORING_INTERRUPTED"
 R_MULTIPLE_FAILING = "MULTIPLE_CAMERAS_FAILING"
+R_PHASE_HALTED = "PHASED_RECOVERY_HALTED"
 R_PEER_NOT_HEALTHY = "PEER_NOT_HEALTHY"
 R_NO_HEALTHY_PEER = "NO_HEALTHY_PEER"
 R_OUTAGE_ATTEMPT_CONSUMED = "OUTAGE_ATTEMPT_CONSUMED"
@@ -200,6 +204,13 @@ class CameraRuntime:
     # Store-sourced latches, refreshed each snapshot.
     store_latched: bool = False
     store_armed: bool = False
+    # Outage reporting: when frames stopped (wall clock), whether a reboot was
+    # requested during this outage, and the hold-reason sets already reported
+    # this outage (each distinct set is reported once, so flapping peers
+    # cannot flood the bounded history).
+    outage_started_utc: float | None = None
+    outage_rebooted: bool = False
+    reported_holds: set[frozenset[str]] = field(default_factory=set)
 
 
 class DecisionEngine:
@@ -232,7 +243,7 @@ class DecisionEngine:
         self.restart_grace_until: float | None = None
         self.last_snapshot: Snapshot | None = None
         self.last_received_mono: float | None = None
-        self.group_inhibited = False
+        self.multiple_failing_active = False
         self.last_problem: str | None = None
         self.last_problem_at_mono: float | None = None
 
@@ -414,7 +425,7 @@ class DecisionEngine:
             and self._monitored_enabled(key)
         ]
 
-        self._update_group_inhibition(failing, now_mono, now_utc, decision)
+        self._update_multiple_failing(failing, now_mono, now_utc, decision)
 
         for key, rt in self.cameras.items():
             cam_cfg = self.config.cameras[key]
@@ -467,52 +478,36 @@ class DecisionEngine:
 
         self._maybe_propose(snapshot, now_mono, now_utc, now_acc, decision, failing)
 
-    def _update_group_inhibition(
+    def _update_multiple_failing(
         self,
         failing: list[str],
         now_mono: float,
         now_utc: float,
         decision: EngineDecision,
     ) -> None:
+        """Report the start of a multi-camera episode.
+
+        Several failing cameras no longer inhibit recovery outright: they are
+        recovered one at a time while a stably healthy peer remains (see
+        evaluate_action). Evidence is kept, so a camera's window is not reset
+        merely because another camera recovered.
+        """
         if len(failing) >= GROUP_INHIBITION_THRESHOLD:
-            if not self.group_inhibited:
-                self.group_inhibited = True
-                names = " and ".join(sorted(failing[:GROUP_INHIBITION_THRESHOLD]))
+            if not self.multiple_failing_active:
+                self.multiple_failing_active = True
+                names = ", ".join(sorted(failing))
                 decision.events.append(
                     self._event(
-                        "inhibited",
+                        "multiple_failing",
                         now_mono,
                         now_utc,
                         reason=R_MULTIPLE_FAILING,
-                        detail=f"{names} have no frames; automatic recovery inhibited",
+                        detail=f"{len(failing)} cameras have no frames ({names}); "
+                        "recovering one at a time while a stably healthy peer remains",
                     )
                 )
-            self._cancel_in_flight(
-                GuardFailure(R_MULTIPLE_FAILING, "multiple cameras failing"),
-                now_mono,
-                now_utc,
-                decision,
-            )
-            return
-        if self.group_inhibited and len(failing) < GROUP_INHIBITION_THRESHOLD:
-            # The group episode ended; each remaining failure must pass a
-            # brand-new full observation window with healthy peers.
-            self.group_inhibited = False
-            for key in failing:
-                rt = self.cameras[key]
-                rt.bad_since = None
-                rt.bad_last = None
-                rt.bad_keys.clear()
-                decision.events.append(
-                    self._event(
-                        "state_changed",
-                        now_mono,
-                        now_utc,
-                        camera=key,
-                        reason="GROUP_EPISODE_ENDED",
-                        detail="peer recovered; a full new observation window is required",
-                    )
-                )
+        else:
+            self.multiple_failing_active = False
 
     def _process_flowing(
         self,
@@ -525,6 +520,22 @@ class DecisionEngine:
         key_advanced: bool,
         cached_delta: float,
     ) -> None:
+        if rt.outage_started_utc is not None:
+            outage_s = max(0.0, now_utc - rt.outage_started_utc)
+            decision.events.append(
+                self._event(
+                    "frames_restored",
+                    now_mono,
+                    now_utc,
+                    camera=key,
+                    incident_id=rt.incident_id,
+                    reason="AFTER_REBOOT_REQUEST" if rt.outage_rebooted else "SELF_RECOVERED",
+                    detail=f"outage_s={outage_s:.0f}; frames restored after {_duration(outage_s)}",
+                )
+            )
+            rt.outage_started_utc = None
+            rt.outage_rebooted = False
+            rt.reported_holds.clear()
         # Re-adopt a durable latch discovered after a restart so the
         # healthy-confirmation exit can fire (and so it is never clobbered).
         if rt.store_latched and rt.state not in (CameraState.BOOT_GRACE, CameraState.LATCHED):
@@ -619,6 +630,8 @@ class DecisionEngine:
         cached_delta: float,
     ) -> None:
         rt.healthy_since = None
+        if rt.outage_started_utc is None:
+            rt.outage_started_utc = now_utc
         grace_done = now_mono - self.start_mono >= self.t["startup_grace_s"]
         if key_advanced:
             if rt.bad_since is None:
@@ -725,17 +738,19 @@ class DecisionEngine:
             return
         if self.reservation_active:
             return  # a durable reservation awaits its outcome
-        if self.store_unsafe or self.config.mode != "recover":
+        if self.store_unsafe:
             return
         if self._boot_grace_active_anywhere() is not None:
-            return
-        if len(failing) >= GROUP_INHIBITION_THRESHOLD:
-            return
+            return  # one recovery at a time, including its confirmation
 
-        for key in failing:
+        # Longest-failing first, so phased recovery is deterministic and fair.
+        order = {key: i for i, key in enumerate(self.cameras)}
+        candidates = sorted(
+            (k for k in failing if self._evidence_complete(self.cameras[k], now_mono)),
+            key=lambda k: (self.cameras[k].bad_since or 0.0, order[k]),
+        )
+        for key in candidates:
             rt = self.cameras[key]
-            if not self._evidence_complete(rt, now_mono):
-                continue
             check = self.evaluate_action(key, snapshot=snapshot, now_mono=now_mono, now_acc=now_acc)
             if check.permitted:
                 action = ProposedAction(
@@ -760,6 +775,52 @@ class DecisionEngine:
                     )
                 )
                 return
+            self._report_hold(key, rt, check, now_mono, now_utc, decision)
+
+    def _report_hold(
+        self,
+        key: str,
+        rt: CameraRuntime,
+        check: ActionCheck,
+        now_mono: float,
+        now_utc: float,
+        decision: EngineDecision,
+    ) -> None:
+        """Record why a camera with complete failure evidence was not
+        recovered: each distinct set of reasons once per outage.
+
+        In observe mode, a camera whose only obstacle is observe mode itself
+        is recorded as ``would_recover``: the decision recover mode would
+        have made, without acting on it.
+        """
+        codes = frozenset(f.code for f in check.failures)
+        if not codes or codes in rt.reported_holds:
+            return
+        rt.reported_holds.add(codes)
+        if codes == {R_MODE_OBSERVE}:
+            decision.events.append(
+                self._event(
+                    "would_recover",
+                    now_mono,
+                    now_utc,
+                    camera=key,
+                    reason=R_MODE_OBSERVE,
+                    detail="every other recovery condition is satisfied; observe mode "
+                    "does not act (recover mode reboots failing cameras one at a time)",
+                )
+            )
+            return
+        specific = [f for f in check.failures if f.code != R_MODE_OBSERVE] or list(check.failures)
+        decision.events.append(
+            self._event(
+                "recovery_held",
+                now_mono,
+                now_utc,
+                camera=key,
+                reason=specific[0].code,
+                detail=", ".join(sorted(codes)),
+            )
+        )
 
     def cancel_proposed(
         self,
@@ -887,8 +948,9 @@ class DecisionEngine:
             and now_mono - self.monitoring_resumed_at < self.t["post_interruption_stability_s"]
         ):
             fail(R_MONITORING_INTERRUPTED, "telemetry resumed after a gap; stabilization active")
-        # 10/11/12. witnesses
+        # 10/11/12. witnesses and phasing
         other_failing: list[str] = []
+        latched_failing: list[str] = []
         peers_stable = 0
         peers_known_healthy = 0
         peers_total = 0
@@ -904,6 +966,8 @@ class DecisionEngine:
             peers_total += 1
             if other_status is CameraStatus.NO_FRAMES:
                 other_failing.append(other_key)
+                if other_rt.store_latched or other_rt.state is CameraState.LATCHED:
+                    latched_failing.append(other_key)
             elif other_status is CameraStatus.FRAMES_FLOWING:
                 peers_known_healthy += 1
                 if (
@@ -911,21 +975,22 @@ class DecisionEngine:
                     and now_mono - other_rt.healthy_since >= self._peer_stable_s
                 ):
                     peers_stable += 1
-        if len(other_failing) + 1 >= GROUP_INHIBITION_THRESHOLD:
+        if latched_failing:
             fail(
-                R_MULTIPLE_FAILING,
-                f"{len(other_failing) + 1} cameras failing: {', '.join([camera, *other_failing])}",
+                R_PHASE_HALTED,
+                f"a reboot did not restore {', '.join(latched_failing)}; "
+                "not rebooting further cameras while it stays dark",
             )
         if peers_total == 0:
             fail(R_NO_HEALTHY_PEER, "no other monitored camera exists")
-        elif peers_stable != peers_known_healthy or peers_known_healthy != (
-            peers_total - len(other_failing)
-        ):
-            # Failing peers are already reported by MULTIPLE_FAILING; this
-            # guard covers peers that are neither failing nor stably healthy.
-            fail(R_PEER_NOT_HEALTHY, "not all peer cameras are known and stably healthy")
-        if peers_total > 0 and peers_stable == 0 and not other_failing:
-            fail(R_NO_HEALTHY_PEER, "no stably healthy peer")
+        else:
+            if peers_stable != peers_known_healthy or peers_known_healthy != (
+                peers_total - len(other_failing)
+            ):
+                # Every non-failing peer must be known and stably healthy.
+                fail(R_PEER_NOT_HEALTHY, "not all peer cameras are known and stably healthy")
+            if peers_stable == 0:
+                fail(R_NO_HEALTHY_PEER, "no stably healthy peer")
         # 13. store health
         if self.store_unsafe:
             fail(R_STORE_UNSAFE, "state store is not healthy")
@@ -1027,6 +1092,7 @@ class DecisionEngine:
         rt = self.cameras.get(camera)
         if rt is not None:
             rt.pending_since = None
+            rt.outage_rebooted = True
         decision.events.append(
             self._event(
                 "action_reserved",
@@ -1094,6 +1160,21 @@ class DecisionEngine:
         rt = self.cameras.get(camera)
         if rt is not None:
             rt.preflight_backoff_until = now_mono + PREFLIGHT_BACKOFF_S
+        if code in ("AUTH_FAILED", "UNSUPPORTED"):
+            # Wrong credentials do not fix themselves: latch durably, exactly
+            # as a rejected reboot would, until an operator acknowledges.
+            decision.store_ops.append(StoreOp("auth_latch", camera=camera))
+            decision.events.append(
+                self._event(
+                    "auth_latched",
+                    now_mono,
+                    now_utc,
+                    camera=camera,
+                    reason=R_AUTH_LATCHED,
+                    detail=f"ONVIF preflight failed ({code}); recovery latched until "
+                    "the cause is fixed and `fwatch acknowledge` is run",
+                )
+            )
         cancelled = self._cancel_in_flight(
             GuardFailure(R_PREFLIGHT_FAILED, code), now_mono, now_utc, decision
         )
@@ -1200,11 +1281,18 @@ class DecisionEngine:
             reasons.append(R_OPERATION_IN_FLIGHT)
         if self._boot_grace_active_anywhere() is not None:
             reasons.append(R_OPERATION_IN_FLIGHT)
-        if len(self._failing_cameras()) >= GROUP_INHIBITION_THRESHOLD:
-            reasons.append(R_MULTIPLE_FAILING)
+        failing = self._failing_cameras()
         monitored = [k for k in self.cameras if self._monitored_enabled(k)]
-        if len(monitored) <= 1:
+        any_flowing = any(
+            self.cameras[k].last_status is CameraStatus.FRAMES_FLOWING for k in monitored
+        )
+        if len(monitored) <= 1 or (failing and not any_flowing):
             reasons.append(R_NO_HEALTHY_PEER)
+        if len(failing) >= GROUP_INHIBITION_THRESHOLD and any(
+            self.cameras[k].store_latched or self.cameras[k].state is CameraState.LATCHED
+            for k in failing
+        ):
+            reasons.append(R_PHASE_HALTED)
         return reasons
 
     def camera_summaries(self, now_mono: float) -> dict[str, dict[str, Any]]:
@@ -1226,6 +1314,17 @@ class DecisionEngine:
                 "seconds_unhealthy": now_mono - rt.bad_since if rt.bad_since is not None else None,
             }
         return out
+
+
+def _duration(seconds: float) -> str:
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
 
 
 OUTCOME_DETAILS = {

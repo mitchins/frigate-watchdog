@@ -779,6 +779,74 @@ class Store:
         )
         return [HistoryRow(*row) for row in rows]
 
+    def report(self) -> dict[str, Any]:
+        """Per-camera effectiveness summary.
+
+        Outage counts and durations come from the bounded event history (the
+        window starts at ``events_since_utc``); attempts, outcomes and latched
+        incidents come from the never-pruned safety tables.
+        """
+        c = self._require_open()
+        cameras: dict[str, dict[str, Any]] = {}
+
+        def cam(key: str) -> dict[str, Any]:
+            return cameras.setdefault(
+                key,
+                {
+                    "outages": 0,
+                    "self_recovered": 0,
+                    "restored_after_reboot": 0,
+                    "would_recover": 0,
+                    "recovery_held": 0,
+                    "reboots_sent": 0,
+                    "outcomes": {},
+                    "latched_incidents": 0,
+                    "outage_s": [],
+                    "last_outage_utc": None,
+                },
+            )
+
+        for kind, camera, reason, detail, ts in c.execute(
+            "SELECT kind, camera, reason, detail, ts_utc FROM events "
+            "WHERE camera IS NOT NULL AND kind IN "
+            "('frames_stopped', 'frames_restored', 'would_recover', 'recovery_held')"
+        ):
+            row = cam(camera)
+            if kind == "frames_stopped":
+                row["outages"] += 1
+                row["last_outage_utc"] = max(row["last_outage_utc"] or 0.0, ts)
+            elif kind == "frames_restored":
+                key = (
+                    "restored_after_reboot"
+                    if reason == "AFTER_REBOOT_REQUEST"
+                    else ("self_recovered")
+                )
+                row[key] += 1
+                for part in (detail or "").split(";"):
+                    name, _, value = part.strip().partition("=")
+                    if name == "outage_s" and value.isdigit():
+                        row["outage_s"].append(int(value))
+            else:
+                row[kind] += 1
+        for camera, outcome in c.execute("SELECT camera_key, outcome FROM attempts"):
+            row = cam(camera)
+            row["reboots_sent"] += 1
+            label = outcome or "UNRECORDED"
+            row["outcomes"][label] = row["outcomes"].get(label, 0) + 1
+        for (camera,) in c.execute(
+            "SELECT camera_key FROM incidents WHERE state IN ('latched', 'acknowledged')"
+        ):
+            cam(camera)["latched_incidents"] += 1
+
+        for row in cameras.values():
+            durations = sorted(row.pop("outage_s"))
+            row["outage_count_measured"] = len(durations)
+            row["outage_median_s"] = durations[len(durations) // 2] if durations else None
+            row["outage_max_s"] = durations[-1] if durations else None
+            row["outage_total_s"] = sum(durations)
+        since = c.execute("SELECT MIN(ts_utc) FROM events").fetchone()[0]
+        return {"events_since_utc": since, "cameras": dict(sorted(cameras.items()))}
+
     # ---------------------------------------------------------------- status
 
     def status(self) -> dict[str, Any]:

@@ -34,7 +34,7 @@ USER 1000:1000
 WORKDIR /app
 VOLUME ["/data"]
 
-# The status API binds loopback inside the container; publishing is opt-in.
+# The status API port; publishing it from the host is opt-in (loopback only).
 EXPOSE 8080
 
 # Uses only the standard library: valid under a read-only root filesystem.

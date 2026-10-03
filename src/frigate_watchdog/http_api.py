@@ -1,10 +1,11 @@
-"""Read-only HTTP surface: /health, /stats, /history.
+"""Read-only HTTP surface: /health, /stats, /history, /report.
 
 /health reports whether the watchdog process and its decision loop are
 functioning. It must not fail merely because a camera, Frigate, or MQTT is
 offline — otherwise Docker health-driven automation becomes another restart
-loop. A dead decision loop is unhealthy; a functioning watchdog correctly
-inhibiting actions is alive.
+loop. A dead decision loop is unhealthy, and so is a loop whose iterations
+keep failing internally; a functioning watchdog correctly inhibiting actions
+is alive. (Frigate or camera outages never raise out of an iteration.)
 
 No reboot endpoint, no config writes, no acknowledgement action over HTTP.
 """
@@ -18,6 +19,7 @@ from typing import Any
 from aiohttp import web
 
 from . import __version__
+from .constants import MAX_CONSECUTIVE_ITERATION_FAILURES
 from .policy import DecisionEngine
 from .store import Store, StoreError
 
@@ -36,8 +38,11 @@ class HealthSnapshot:
         self.instance = "default"
         self.mode = "observe"
         self.http_port: int | None = None
+        self.consecutive_iteration_failures = 0
 
     def loop_alive(self) -> bool:
+        if self.consecutive_iteration_failures >= MAX_CONSECUTIVE_ITERATION_FAILURES:
+            return False
         if self.loop_stopped or self.last_loop_activity_mono is None:
             return not self.loop_stopped
         return (time.monotonic() - self.last_loop_activity_mono) < 3 * max(
@@ -59,6 +64,7 @@ def build_app(
             "version": __version__,
             "uptime_s": round(time.monotonic() - snapshot.started_mono, 1),
             "store_ok": snapshot.store_ok,
+            "consecutive_iteration_failures": snapshot.consecutive_iteration_failures,
         }
         return web.json_response(payload, status=200 if alive else 503)
 
@@ -124,10 +130,21 @@ def build_app(
             return web.json_response({"error": str(exc), "events": []}, status=503)
         return web.json_response({"events": [row.as_dict() for row in rows], "count": len(rows)})
 
+    async def report(_request: web.Request) -> web.Response:
+        if store is None or not snapshot.store_ok:
+            return web.json_response(
+                {"error": snapshot.store_error or "store unavailable"}, status=503
+            )
+        try:
+            return web.json_response(store.report())
+        except StoreError as exc:
+            return web.json_response({"error": str(exc)}, status=503)
+
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/stats", stats)
     app.router.add_get("/history", history)
+    app.router.add_get("/report", report)
     return app
 
 

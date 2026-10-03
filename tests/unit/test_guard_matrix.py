@@ -137,12 +137,20 @@ def scenario_monitoring_interrupted(deleted: str | None):
     return h, "porch", "MONITORING_INTERRUPTED"
 
 
-def scenario_multiple_failing(deleted: str | None):
+def scenario_phase_halted(deleted: str | None):
+    # porch was rebooted and stayed dark (latched); driveway then fails with a
+    # healthy doorbell witness. The only blocker for driveway is the halt.
     h = make_harness()
-    warm_up_healthy(h)
+    eligible_base(h)
+    attempt = h.reserve("porch")
+    h.outcome("porch", attempt, "OUTCOME_UNKNOWN")
+    for _ in range(8):
+        h.poll(fps=healthy_fps(("porch",)))
+    h.tick()  # boot grace elapses without frames -> LATCHED
+    h.store.attempts[-1] = ("porch", h.store.acc - 4000.0, "OUTCOME_UNKNOWN")
     for _ in range(8):
         h.poll(fps=healthy_fps(("porch", "driveway")))
-    return h, "porch", "MULTIPLE_CAMERAS_FAILING"
+    return h, "driveway", "PHASED_RECOVERY_HALTED"
 
 
 def scenario_peer_not_healthy(deleted: str | None):
@@ -271,7 +279,7 @@ BUILDERS = {
     "STARTUP_GRACE_ACTIVE": scenario_startup_grace,
     "FRIGATE_RESTART_GRACE_ACTIVE": scenario_restart_grace,
     "MONITORING_INTERRUPTED": scenario_monitoring_interrupted,
-    "MULTIPLE_CAMERAS_FAILING": scenario_multiple_failing,
+    "PHASED_RECOVERY_HALTED": scenario_phase_halted,
     "PEER_NOT_HEALTHY": scenario_peer_not_healthy,
     "NO_HEALTHY_PEER": scenario_no_healthy_peer,
     "OUTAGE_ATTEMPT_CONSUMED": scenario_attempt_consumed,
@@ -325,7 +333,7 @@ def test_each_guard_is_load_bearing(code):
     mutant.monitoring_resumed_at = h.engine.monitoring_resumed_at
     mutant.restart_grace_until = h.engine.restart_grace_until
     mutant.store_unsafe = h.engine.store_unsafe
-    mutant.group_inhibited = h.engine.group_inhibited
+    mutant.multiple_failing_active = h.engine.multiple_failing_active
     check = mutant.evaluate_action(
         camera,
         snapshot=h.engine.last_snapshot,

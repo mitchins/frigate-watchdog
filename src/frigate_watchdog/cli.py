@@ -2,7 +2,7 @@
 
     fwatch check-config          validate configuration and exit
     fwatch serve                 run the appliance
-    fwatch health|stats|history  query a running instance's local HTTP API
+    fwatch health|stats|history|report  query a running instance's local HTTP API
     fwatch probe CAMERA          read-only ONVIF checks; never reboots
     fwatch acknowledge CAMERA    clear a latch (only while the service is stopped)
 
@@ -61,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_history.add_argument("--after", type=int, default=0)
     p_history.add_argument("--limit", type=int, default=50)
 
+    p_report = sub.add_parser("report", help="per-camera outage and recovery summary")
+    p_report.add_argument("--json", action="store_true")
+
     p_probe = sub.add_parser("probe", help="read-only ONVIF checks for a camera")
     p_probe.add_argument("camera")
 
@@ -71,7 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _get(config: WatchdogConfig, path: str) -> dict[str, Any]:
-    url = f"http://{config.http.host}:{config.http.port}{path}"
+    # An all-interfaces bind is reached locally over loopback.
+    host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(config.http.host, config.http.host)
+    url = f"http://{'[' + host + ']' if ':' in host else host}:{config.http.port}{path}"
     try:
         with urllib.request.urlopen(url, timeout=5) as response:
             payload: dict[str, Any] = json.loads(response.read().decode())
@@ -160,6 +165,39 @@ def _acknowledge(config: WatchdogConfig, data_dir: Path, camera: str, reason: st
         return 2
 
 
+def _iso(ts: object) -> str:
+    from datetime import UTC, datetime
+
+    if not isinstance(ts, int | float):
+        return "-"
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _mins(seconds: object) -> str:
+    return f"{seconds / 60:.0f}m" if isinstance(seconds, int | float) else "-"
+
+
+def _format_report(payload: dict[str, Any]) -> str:
+    lines = [f"events retained since {_iso(payload.get('events_since_utc'))}"]
+    header = (
+        f"{'camera':<10} {'outages':>7} {'self-ok':>7} {'rebooted':>8} {'would':>5} "
+        f"{'held':>4} {'sent':>4} {'latched':>7} {'median':>7} {'max':>7}"
+    )
+    lines.append(header)
+    for name, row in payload.get("cameras", {}).items():
+        lines.append(
+            f"{name:<10} {row['outages']:>7} {row['self_recovered']:>7} "
+            f"{row['restored_after_reboot']:>8} {row['would_recover']:>5} "
+            f"{row['recovery_held']:>4} {row['reboots_sent']:>4} {row['latched_incidents']:>7} "
+            f"{_mins(row['outage_median_s']):>7} {_mins(row['outage_max_s']):>7}"
+        )
+    lines.append(
+        "self-ok: frames returned without a reboot; rebooted: returned after a reboot "
+        "request; would: observe-mode decisions to reboot; sent: reboot commands"
+    )
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     setup_console_logging(verbose=args.verbose)
@@ -195,9 +233,18 @@ def main(argv: list[str] | None = None) -> int:
         payload = _get(config, f"/history?after={args.after}&limit={args.limit}")
         for event in payload.get("events", []):
             print(
-                f"{event.get('id')} {event.get('ts_utc')} {event.get('kind')} "
+                f"{event.get('id')} {_iso(event.get('ts_utc'))} {event.get('kind')} "
                 f"camera={event.get('camera', '-')} reason={event.get('reason', '-')}"
+                + (f" detail={event['detail']}" if event.get("detail") else "")
             )
+        return 0
+
+    if args.command == "report":
+        payload = _get(config, "/report")
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(_format_report(payload))
         return 0
 
     if args.command == "probe":

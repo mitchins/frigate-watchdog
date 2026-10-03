@@ -1,6 +1,6 @@
 [project]
 name = "frigate-watchdog"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Cautious camera-recovery appliance for Frigate: one bounded ONVIF reboot per sustained single-camera capture failure."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

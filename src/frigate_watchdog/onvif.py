@@ -171,6 +171,45 @@ def _classify_transport_error(exc: Exception, *, sent: bool) -> str:
     return OUTCOME_UNKNOWN
 
 
+def _local(tag: object) -> str:
+    text = str(tag)
+    return text.rsplit("}", 1)[-1]
+
+
+def _child(element: Any, name: str) -> Any:
+    for child in element:
+        if _local(getattr(child, "tag", "")) == name:
+            return child
+    return None
+
+
+def _utc_clock(value: Any) -> str | None:
+    """Extract UTCDateTime as ISO text from a GetSystemDateAndTime reply.
+
+    The schema keeps SystemDateAndTime's contents raw; read them by local
+    name so vendor namespace or child-order differences do not matter.
+    """
+    # zeep may hand back the raw children directly, the response wrapper, or
+    # the SystemDateAndTime holder, depending on how far it unwraps.
+    holder = getattr(value, "SystemDateAndTime", None) or value
+    raw = holder if isinstance(holder, list) else getattr(holder, "_value_1", None)
+    children = list(raw or [])
+    utc = next((c for c in children if _local(getattr(c, "tag", "")) == "UTCDateTime"), None)
+    if utc is None:
+        return None
+    date_el, time_el = _child(utc, "Date"), _child(utc, "Time")
+
+    def field(parent: Any, name: str, width: int) -> str:
+        el = _child(parent, name) if parent is not None else None
+        text = (el.text or "").strip() if el is not None else ""
+        return f"{int(text):0{width}d}" if text.isdigit() else "?" * width
+
+    return (
+        f"{field(date_el, 'Year', 4)}-{field(date_el, 'Month', 2)}-{field(date_el, 'Day', 2)}"
+        f"T{field(time_el, 'Hour', 2)}:{field(time_el, 'Minute', 2)}:{field(time_el, 'Second', 2)}Z"
+    )
+
+
 class OnvifClient:
     """One camera's ONVIF Device Management endpoint."""
 
@@ -260,24 +299,9 @@ class OnvifClient:
             return OnvifResult(_classify_fault(fault), detail=str(fault.message)[:200])
         except Exception as exc:
             return OnvifResult(_classify_transport_error(exc, sent=True), detail=type(exc).__name__)
-        sdt = value  # zeep unwraps the response element to SystemDateTime itself
-        utc = getattr(sdt, "UTCDateTime", None) if sdt is not None else None
-        if utc is None:
-            return OnvifResult("OK", detail="camera reported no clock")
-        time_part = getattr(utc, "Time", None)
-        date_part = getattr(utc, "Date", None)
-
-        def _field(obj: Any, name: str, width: int) -> str:
-            raw = getattr(obj, name, None)
-            if isinstance(raw, bool) or not isinstance(raw, int):
-                return "?" * width if width <= 2 else "????"
-            return f"{raw:0{width}d}"
-
-        clock = (
-            f"{_field(date_part, 'Year', 4)}-{_field(date_part, 'Month', 2)}-"
-            f"{_field(date_part, 'Day', 2)}T{_field(time_part, 'Hour', 2)}:"
-            f"{_field(time_part, 'Minute', 2)}:{_field(time_part, 'Second', 2)}Z"
-        )
+        clock = _utc_clock(value)
+        if clock is None:
+            return OnvifResult("OK", detail="camera reported no UTC clock")
         return OnvifResult("OK", detail=f"camera clock {clock}")
 
     # ---------------------------------------------------------------- write

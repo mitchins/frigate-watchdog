@@ -23,6 +23,7 @@ SOAP_ENV = "http://www.w3.org/2003/05/soap-envelope"
 WSSE_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
 WSU_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 TDS_NS = "http://www.onvif.org/ver10/device/wsdl"
+TT_NS = "http://www.onvif.org/ver10/schema"
 
 
 @dataclass
@@ -31,6 +32,9 @@ class FakeOnvifState:
     password: str = "cam-pass"
     behavior: str = "ok"  # ok | wrong_password | unsupported | fault | reset_after_accept |
     #                       slow | malformed | oversized | redirect | http_401 | drop_silently
+    # Shape of the GetSystemDateAndTime reply: "spec" (schema order) or
+    # "vatilon" (a real camera's reply: Time before Date, CRLF, tt: elements).
+    clock_shape: str = "spec"
     reboot_delay_s: float = 0.0
     requests: dict[str, int] = field(default_factory=dict)
     auth_failures: int = 0
@@ -185,24 +189,10 @@ class FakeOnvifCamera:
 
         if operation == "GetSystemDateAndTime":
             now = datetime.now(UTC).replace(tzinfo=None)
-            envelope = f"""<?xml version="1.0" encoding="UTF-8"?>
-<soap12:Envelope xmlns:soap12="{SOAP_ENV}" xmlns:tds="{TDS_NS}">
-  <soap12:Body>
-    <tds:GetSystemDateAndTimeResponse>
-      <tds:SystemDateTime>
-        <tds:DateTimeType>NTP</tds:DateTimeType>
-        <tds:DaylightSavings>false</tds:DaylightSavings>
-        <tds:UTCDateTime>
-          <tds:Time><tds:Hour>{now.hour}</tds:Hour><tds:Minute>{now.minute}</tds:Minute>
-          <tds:Second>{now.second}</tds:Second></tds:Time>
-          <tds:Date><tds:Year>{now.year}</tds:Year><tds:Month>{now.month}</tds:Month>
-          <tds:Day>{now.day}</tds:Day></tds:Date>
-        </tds:UTCDateTime>
-      </tds:SystemDateTime>
-    </tds:GetSystemDateAndTimeResponse>
-  </soap12:Body>
-</soap12:Envelope>"""
-            return web.Response(text=envelope, content_type="application/soap+xml")
+            return web.Response(
+                text=clock_envelope(now, self.state.clock_shape),
+                content_type="application/soap+xml",
+            )
 
         if operation == "SystemReboot":
             if s.behavior in (
@@ -257,6 +247,41 @@ class FakeOnvifCamera:
   </soap12:Body>
 </soap12:Envelope>"""
         return web.Response(text=envelope, content_type="application/soap+xml")
+
+
+def clock_envelope(now: datetime, shape: str) -> str:
+    """A GetSystemDateAndTime reply in the given shape."""
+    utc = (
+        f"<tt:Date><tt:Year>{now.year}</tt:Year><tt:Month>{now.month}</tt:Month>"
+        f"<tt:Day>{now.day}</tt:Day></tt:Date>"
+        f"<tt:Time><tt:Hour>{now.hour}</tt:Hour><tt:Minute>{now.minute}</tt:Minute>"
+        f"<tt:Second>{now.second}</tt:Second></tt:Time>"
+    )
+    if shape == "vatilon":
+        # Verbatim structure of a Vatilon PB1 (V1.08.89) reply: Time precedes
+        # Date, lines end in CRLF, and an empty Extension closes the element.
+        body = (
+            "<tds:SystemDateAndTime>\r\n<tt:DateTimeType>NTP</tt:DateTimeType>\r\n"
+            "<tt:DaylightSavings>false</tt:DaylightSavings>\r\n"
+            "<tt:TimeZone>\r\n<tt:TZ>EAustraliaStandardTime-10</tt:TZ>\r\n</tt:TimeZone>\r\n"
+            f"<tt:UTCDateTime>\r\n<tt:Time>\r\n<tt:Hour>{now.hour}</tt:Hour>\r\n"
+            f"<tt:Minute>{now.minute}</tt:Minute>\r\n<tt:Second>{now.second}</tt:Second>\r\n"
+            f"</tt:Time>\r\n<tt:Date>\r\n<tt:Year>{now.year}</tt:Year>\r\n"
+            f"<tt:Month>{now.month}</tt:Month>\r\n<tt:Day>{now.day}</tt:Day>\r\n"
+            "</tt:Date>\r\n</tt:UTCDateTime>\r\n<tt:Extension />\r\n</tds:SystemDateAndTime>"
+        )
+    else:
+        body = (
+            "<tds:SystemDateAndTime><tt:DateTimeType>NTP</tt:DateTimeType>"
+            "<tt:DaylightSavings>false</tt:DaylightSavings>"
+            f"<tt:UTCDateTime>{utc}</tt:UTCDateTime></tds:SystemDateAndTime>"
+        )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap12:Envelope xmlns:soap12="{SOAP_ENV}" xmlns:tds="{TDS_NS}" xmlns:tt="{TT_NS}">
+  <soap12:Body>
+    <tds:GetSystemDateAndTimeResponse>{body}</tds:GetSystemDateAndTimeResponse>
+  </soap12:Body>
+</soap12:Envelope>"""
 
 
 def future_utc(seconds: float) -> datetime:

@@ -30,10 +30,11 @@ best-effort fallback around a failed condition.
 * Frigate telemetry and effective configuration are fresh
 * watchdog startup grace and Frigate-restart grace have finished
 * zero frames persisted for ≥120s, supported by ≥6 distinct fresh snapshots
-* exactly one monitored, enabled camera is failing
-* every other monitored, enabled camera is known and stably healthy
-* at least one healthy peer exists
-* no recovery is in flight or in boot grace
+* at least one other monitored, enabled camera is stably healthy
+* every other non-failing camera is known and stably healthy
+* no other failing camera is still dark after its own reboot request
+  (phasing halts there)
+* no recovery is in flight or in boot grace (one camera at a time)
 * this outage has not already consumed its attempt
 * per-camera cooldown (1h runtime) and daily budget (3 / 24h runtime) permit it
 * global spacing (5 minutes) permits it
@@ -54,15 +55,15 @@ codes:
 | `STARTUP_GRACE_ACTIVE` | Watchdog just started |
 | `FRIGATE_RESTART_GRACE_ACTIVE` | Frigate uptime/last_updated moved backwards |
 | `MONITORING_INTERRUPTED` | Polling gap; evidence was cleared, limits were not |
-| `MULTIPLE_CAMERAS_FAILING` | Two or more enabled cameras have no frames |
-| `NO_HEALTHY_PEER` | Single-camera install, or no stably healthy witness |
+| `PHASED_RECOVERY_HALTED` | Several cameras are failing and a reboot already left one of them dark; further reboots stop |
+| `NO_HEALTHY_PEER` | Single-camera install, every camera failing, or no stably healthy witness |
 | `PEER_NOT_HEALTHY` | A non-failing peer is unknown or not yet stable |
 | `OUTAGE_ATTEMPT_CONSUMED` | This outage already used its one attempt |
 | `COOLDOWN_ACTIVE` | Less than one hour of runtime since the last attempt |
 | `BUDGET_EXHAUSTED` | Three attempts in the last 24h of runtime |
 | `OPERATION_IN_FLIGHT` | Another recovery is reserved or in boot grace |
 | `PREFLIGHT_FAILED` | ONVIF read failed; no reboot was sent |
-| `AUTH_LATCHED` | Bad credentials or unsupported reboot; wait for `acknowledge` |
+| `AUTH_LATCHED` | Credentials refused (preflight or reboot) or reboot unsupported; wait for `acknowledge` |
 | `STATE_STORE_UNSAFE` | SQLite unusable; recovery inhibited until restart |
 
 ## Persistence
@@ -89,13 +90,64 @@ memory.
 | Outcome | Meaning | Next |
 | ------- | ------- | ---- |
 | `ACKNOWLEDGED` | Camera accepted `SystemReboot` | Boot grace, then wait for frames |
-| `OUTCOME_UNKNOWN` | Disconnect/timeout after possible delivery | **No retry.** Latch. Wait for frames or `acknowledge` |
+| `OUTCOME_UNKNOWN` | Disconnect/timeout after possible delivery | **No resend.** Boot grace, then wait for frames |
 | `AUTH_FAILED` | Credentials rejected | Auth-latch until `acknowledge` after correction |
 | `UNSUPPORTED` | Camera does not implement reboot | Auth-latch until `acknowledge` |
 | `UNREACHABLE` | Never connected | No send. Preflight backoff |
 | `REJECTED` | Explicit SOAP fault | Latch |
 
 An ONVIF acknowledgement is not recovery success.
+
+### `OUTCOME_UNKNOWN`
+
+The command may have executed. Automatic resend is forbidden. The watchdog
+enters boot grace and waits for frames: if they return and stay healthy for
+`recovery_confirm_s` (default 120 s), the incident resolves normally and no
+acknowledgement is needed. Only if frames do **not** return within boot
+grace is the outage latched; acknowledge it after dealing with the cause.
+
+Some cameras reboot by closing the ONVIF connection before returning a
+complete response. This is reported as `OUTCOME_UNKNOWN` by design. If
+frames subsequently return and remain healthy, recovery is confirmed
+normally; no acknowledgement is required.
+
+## Several cameras failing
+
+Failing cameras are recovered **one at a time**, longest-failing first:
+
+1. A reboot is only proposed while at least one other camera is stably
+   healthy. If every camera is dark, nothing is rebooted
+   (`NO_HEALTHY_PEER`): that points at the network, the switch, or Frigate.
+2. After a reboot request, the next camera waits for the previous one's
+   boot grace and healthy confirmation, then the global five-minute spacing.
+3. If a reboot leaves its camera dark (latched), no further cameras are
+   rebooted while it stays dark (`PHASED_RECOVERY_HALTED`). A reboot that
+   didn't help is evidence the cause is not the cameras.
+
+Per-camera cooldowns and daily budgets apply throughout, and every attempt
+still needs a passing read-only preflight, so cameras that are unreachable
+(for example behind a failed switch) are never sent a reboot.
+
+## Events and reports
+
+Persisted history (`fwatch history`, `/history`) records state changes, not
+polls:
+
+| Kind | Meaning |
+| ---- | ------- |
+| `frames_stopped` | A camera's frames stopped (outage start) |
+| `frames_restored` | Frames returned; `SELF_RECOVERED` or `AFTER_REBOOT_REQUEST`, with `outage_s=` |
+| `multiple_failing` | Several cameras are failing at once |
+| `would_recover` | Observe mode: recover mode would have rebooted this camera now |
+| `recovery_held` | Failure evidence was complete but recovery was held; all reasons listed |
+| `action_proposed` … `recovery_confirmed` | A recovery attempt and its outcome |
+| `auth_latched` | The read-only preflight was refused (credentials); latched until acknowledged |
+
+`fwatch report` (`/report`) summarises this per camera: outages, self-
+recovered versus after-reboot, `would_recover` decisions, reboots sent,
+latched incidents, and median/maximum outage duration. Outage counts cover
+the retained event window (shown in the report); reboot and incident counts
+come from safety records that are never pruned.
 
 ## Frigate authentication
 
@@ -119,9 +171,19 @@ cameras.
 v0.1.0 will not automatically reboot without a witness. That is
 intentional.
 
-**`MULTIPLE_CAMERAS_FAILING` after a LAN blip.**
-Wait. When one recovers, the remaining camera must pass a **new** full
-observation window. Old proposals are discarded.
+**`NO_HEALTHY_PEER` with every camera dark after a LAN blip.**
+Wait. Nothing is rebooted while no camera is healthy. As soon as one
+camera's frames return and stay stable, the others become eligible one at
+a time.
+
+**`PHASED_RECOVERY_HALTED`.**
+A reboot during a multi-camera episode did not bring its camera back. The
+cause is probably not the cameras. Investigate, fix, then `acknowledge` the
+latched camera.
+
+**`would_recover` events in observe mode.**
+Each one is a decision recover mode would have acted on. Review them before
+enabling recovery.
 
 **Reboot requested, camera still dark.**
 Read `last_outcome`. `OUTCOME_UNKNOWN` means the command may have landed;
