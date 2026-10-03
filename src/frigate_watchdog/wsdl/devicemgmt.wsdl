@@ -51,35 +51,15 @@
       <xs:element name="GetSystemDateAndTimeResponse">
         <xs:complexType>
           <xs:sequence>
-            <xs:element name="SystemDateTime" minOccurs="0">
+            <!-- ONVIF names this SystemDateAndTime and puts its children in
+                 the tt: schema namespace. Real cameras also vary child order
+                 (Time before Date), so the contents are kept raw and read by
+                 local name; this read is diagnostic only. -->
+            <xs:element name="SystemDateAndTime" minOccurs="0">
               <xs:complexType>
                 <xs:sequence>
-                  <xs:element name="DateTimeType" type="xs:string" minOccurs="0"/>
-                  <xs:element name="DaylightSavings" type="xs:boolean" minOccurs="0"/>
-                  <xs:element name="UTCDateTime" minOccurs="0">
-                    <xs:complexType>
-                      <xs:sequence>
-                        <xs:element name="Time">
-                          <xs:complexType>
-                            <xs:sequence>
-                              <xs:element name="Hour" type="xs:int"/>
-                              <xs:element name="Minute" type="xs:int"/>
-                              <xs:element name="Second" type="xs:int"/>
-                            </xs:sequence>
-                          </xs:complexType>
-                        </xs:element>
-                        <xs:element name="Date">
-                          <xs:complexType>
-                            <xs:sequence>
-                              <xs:element name="Year" type="xs:int"/>
-                              <xs:element name="Month" type="xs:int"/>
-                              <xs:element name="Day" type="xs:int"/>
-                            </xs:sequence>
-                          </xs:complexType>
-                        </xs:element>
-                      </xs:sequence>
-                    </xs:complexType>
-                  </xs:element>
+                  <xs:any namespace="##any" processContents="skip"
+                          minOccurs="0" maxOccurs="unbounded"/>
                 </xs:sequence>
               </xs:complexType>
             </xs:element>

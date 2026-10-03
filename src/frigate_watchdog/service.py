@@ -47,6 +47,11 @@ _PERSISTED_EVENT_KINDS = frozenset(
     {
         "armed",
         "frames_stopped",
+        "frames_restored",
+        "multiple_failing",
+        "would_recover",
+        "recovery_held",
+        "auth_latched",
         "frigate_restarted",
         "monitoring_interrupted",
         "inhibited",
@@ -239,7 +244,12 @@ class WatchdogService:
                 try:
                     await self._iterate()
                 except Exception:
+                    # The loop keeps running, but /health must not keep
+                    # reporting alive while every iteration fails internally.
+                    self.health.consecutive_iteration_failures += 1
                     logger.exception("coordinator iteration failed")
+                else:
+                    self.health.consecutive_iteration_failures = 0
                 self.health.last_loop_activity_mono = time.monotonic()
                 elapsed = time.monotonic() - started
                 await asyncio.sleep(max(0.2, poll_s - elapsed))

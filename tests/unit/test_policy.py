@@ -62,11 +62,12 @@ def test_startup_grace_blocks_proposal(h):
         h2.poll(fps=healthy_fps(ALL))
     assert h2.total_proposals == 0
     assert GlobalState.STARTING in h2.engine.global_states
-    # past grace, still all failing: group inhibition, never individual recovery
+    # past grace, still all failing: no healthy witness, never any recovery
     for _ in range(6):
         h2.poll(fps=healthy_fps(ALL))
     assert h2.total_proposals == 0
     assert GlobalState.MULTIPLE_CAMERAS_UNHEALTHY in h2.engine.global_states
+    assert "NO_HEALTHY_PEER" in h2.engine.global_inhibition_reasons(h2.clock.mono)
 
 
 def test_proposal_requires_all_guards(tmp_path):
@@ -100,57 +101,86 @@ def test_never_armed_camera_never_proposes(h):
 # --------------------------------------------------------------------- group
 
 
-def test_two_failures_inhibit_even_before_threshold_reached(h):
-    # porch has been failing a while; driveway just started failing
+def test_second_failure_does_not_block_the_first(h):
+    # porch has been failing a while; driveway starts failing just before
+    # porch's evidence completes. The doorbell is a stably healthy witness.
     for _ in range(6):
         h.poll(fps=healthy_fps(("porch",)))
     assert h.total_proposals == 0  # not yet 60s/3 snapshots
-    # one more poll: porch evidence complete, but driveway now also zero
-    h.poll(fps=healthy_fps(("porch", "driveway")))
-    assert h.total_proposals == 0
-    assert "MULTIPLE_CAMERAS_FAILING" in h.engine.global_inhibition_reasons(h.clock.mono)
-
-
-def test_two_failures_one_poll_apart_no_storm(h):
-    h.poll(fps=healthy_fps(("porch",)))
-    for _ in range(7):
+    for _ in range(2):
         h.poll(fps=healthy_fps(("porch", "driveway")))
-    assert h.total_proposals == 0
-
-
-def test_one_of_two_recovers_remaining_needs_fresh_window(h):
-    for _ in range(8):
-        h.poll(fps=healthy_fps(("porch", "driveway")))
-    assert h.total_proposals == 0
-    # driveway recovers; porch keeps failing
-    for _ in range(3):
-        h.poll(fps=healthy_fps(("porch",)))
-    # porch's window restarted: no proposal yet despite long total failure
-    assert h.total_proposals == 0
-    # a fresh full window with stable peers -> exactly one proposal
-    for _ in range(7):
-        h.poll(fps=healthy_fps(("porch",)))
     assert h.total_proposals == 1
-    assert h.last_proposal.camera == "porch"
+    assert h.last_proposal.camera == "porch"  # longest-failing first
+    assert h.events_of("multiple_failing"), "the multi-camera episode is reported"
 
 
-def test_peer_recovery_keeps_remaining_failure_data_out_of_eligibility(h):
-    # after group episode ends, evidence snapshot count must restart
+def test_simultaneous_failures_recovered_one_at_a_time(h):
     for _ in range(8):
         h.poll(fps=healthy_fps(("porch", "driveway")))
-    h.poll(fps=healthy_fps(("porch",)))
+    assert h.total_proposals == 1
+    first = h.last_proposal.camera
+    attempt = h.reserve(first)
+    h.outcome(first, attempt, "OUTCOME_UNKNOWN")
+    # while the first camera is in boot grace, the second is never proposed
+    for _ in range(10):
+        h.poll(fps=healthy_fps(("porch", "driveway")))
+    assert h.total_proposals == 1
+
+
+def test_phased_recovery_waits_for_confirmation_then_spacing(h):
+    for _ in range(8):
+        h.poll(fps=healthy_fps(("porch", "driveway")))
+    assert h.last_proposal.camera == "porch"
+    attempt = h.reserve("porch")
+    h.outcome("porch", attempt, "OUTCOME_UNKNOWN")
+    # porch comes back and is confirmed healthy; driveway is still dark
+    for _ in range(14):
+        h.poll(fps=healthy_fps(("driveway",)))
+    assert h.events_of("recovery_confirmed")
+    assert h.total_proposals == 1, "global spacing still holds driveway back"
+    # once the global 5-minute spacing has elapsed, driveway is next
+    for _ in range(20):
+        h.poll(fps=healthy_fps(("driveway",)))
+    assert h.total_proposals == 2
+    assert h.last_proposal.camera == "driveway"
+
+
+def test_phasing_halts_when_a_reboot_did_not_restore_frames(h):
+    for _ in range(8):
+        h.poll(fps=healthy_fps(("porch", "driveway")))
+    attempt = h.reserve("porch")
+    h.outcome("porch", attempt, "OUTCOME_UNKNOWN")
+    for _ in range(20):  # boot grace elapses with porch still dark
+        h.poll(fps=healthy_fps(("porch", "driveway")))
+        h.tick()
+    assert h.state_of("porch") == CameraState.LATCHED.value
+    for _ in range(40):  # well past cooldowns and spacing
+        h.poll(fps=healthy_fps(("porch", "driveway")))
+    assert h.total_proposals == 1, "no further phased reboots after a failed one"
+    assert "PHASED_RECOVERY_HALTED" in h.engine.global_inhibition_reasons(h.clock.mono)
+
+
+def test_no_recovery_when_no_camera_is_healthy(h):
+    for _ in range(10):
+        h.poll(fps=healthy_fps(ALL))
+    assert h.total_proposals == 0
+    assert "NO_HEALTHY_PEER" in h.engine.global_inhibition_reasons(h.clock.mono)
+
+
+def test_evidence_survives_a_peer_recovering(h):
+    for _ in range(4):
+        h.poll(fps=healthy_fps(("porch", "driveway")))
+    h.poll(fps=healthy_fps(("porch",)))  # driveway recovers on its own
     rt = h.engine.cameras["porch"]
-    assert len(rt.bad_keys) == 1  # only the post-episode snapshot counts
+    assert len(rt.bad_keys) >= 3, "porch's evidence window is not reset by a peer"
 
 
-def test_pending_action_cancelled_when_second_camera_fails(h):
+def test_pending_action_survives_a_second_failure(h):
     drive_failure(h, "porch")
     assert h.total_proposals == 1
     h.poll(fps=healthy_fps(("porch", "driveway")))
-    assert h.engine.in_flight is None
-    cancelled = list(h.events_of("action_cancelled"))
-    assert cancelled and cancelled[-1].reason == "MULTIPLE_CAMERAS_FAILING"
-    assert h.state_of("porch") == CameraState.SUSPECT.value
+    assert h.engine.in_flight is not None and h.engine.in_flight.camera == "porch"
+    assert not h.events_of("action_cancelled")
 
 
 def test_pending_action_cancelled_when_camera_recovers(h):

@@ -185,7 +185,8 @@ async def test_get_system_date_and_time(camera):
     result = await client.get_system_date_and_time()
     await client.close()
     assert result.outcome == "OK"
-    assert "camera clock" in result.detail
+    # An actual timestamp, not merely the "no clock" fallback text.
+    assert result.detail.startswith("camera clock 20"), result.detail
 
 
 async def test_dtd_entity_payload_rejected_at_parse(camera):

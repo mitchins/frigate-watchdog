@@ -71,3 +71,8 @@ DEFAULT_TIMINGS: dict[str, float] = {
 TIMING_BOUNDS: dict[str, tuple[float, float]] = {
     name: (lo, hi) for name, (_d, lo, hi) in _TIMING_TABLE.items()
 }
+
+
+MAX_CONSECUTIVE_ITERATION_FAILURES = 5
+"""/health turns unhealthy after this many consecutive failed coordinator
+iterations (internal errors only; Frigate/camera outages never fail one)."""

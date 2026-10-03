@@ -2,14 +2,17 @@
 #
 # The watchdog only initiates outbound connections (Frigate API, camera ONVIF
 # endpoints, optional MQTT). It needs no Docker socket, no device access, no
-# host networking, and publishes no ports by default. To inspect /health,
-# /stats, /history from the host, uncomment the loopback port mapping — it
-# binds to 127.0.0.1 only, never all interfaces.
+# host networking, and publishes no ports by default. The status API listens
+# on all interfaces *inside* the container (config `http.host: 0.0.0.0`); to
+# inspect /health, /stats, /history and /report from the host, uncomment the
+# port mapping below — it publishes on the host's loopback only.
 
 services:
   watchdog:
-    build: .
-    image: frigate-watchdog:local
+    image: ghcr.io/mitchins/frigate-watchdog:0.1.0-rc.2
+    # To build from source instead: comment out `image` and use
+    #   build: .
+    container_name: frigate-watchdog
     restart: unless-stopped
     user: "1000:1000"
     read_only: true
@@ -20,8 +23,8 @@ services:
       - /tmp:size=16m,noexec,nosuid
     volumes:
       # Persistent durable state: recovery limits live here. KEEP THIS VOLUME.
-      - ./data:/data
-      # Read-only configuration.
+      - watchdog_data:/data
+      # Read-only configuration (readable by UID 1000).
       - ./config:/config:ro
     environment:
       # Resolve every *_password_env from the configured credentials.
@@ -36,7 +39,7 @@ services:
           memory: 256M
           pids: 100
           cpus: "0.50"
-    # Optional local status surface (loopback only):
+    # Optional local status surface (host loopback only):
     # ports:
     #   - "127.0.0.1:8080:8080"
     logging:
@@ -44,3 +47,9 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  # Created once with `docker volume create watchdog_data`, so removing the
+  # stack never removes the safety record.
+  watchdog_data:
+    external: true

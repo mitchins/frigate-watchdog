@@ -7,7 +7,8 @@ core safety properties must hold over every generated sequence:
     P1  no attempt without a durable reservation
     P2  no second attempt in the same unresolved outage
     P3  no action while required telemetry is unknown/stale
-    P4  no action while multiple enabled cameras are failing
+    P4  no action without a healthy witness; several failing cameras are
+        recovered one at a time, and never past a camera a reboot left dark
     P5  no action against disabled/maintenance/unconfigured targets
     P6  no restart or clock change reduces a safety limit
     P7  no more than one recovery operation is active at a time
@@ -15,6 +16,7 @@ core safety properties must hold over every generated sequence:
 
 from __future__ import annotations
 
+import itertools
 import random
 from dataclasses import dataclass, field
 
@@ -116,9 +118,9 @@ def test_property_observe_mode_never_sends(steps):
 
 @settings(max_examples=150, deadline=None, derandomize=True)
 @given(st.lists(step_kinds, min_size=15, max_size=80))
-def test_property_no_action_while_two_fail(steps):
+def test_property_phased_recovery_invariants(steps):
     """Replay the sequence while asserting the multi-camera invariant directly
-    against the engine state after every step."""
+    against the engine state at every proposal."""
     h = make_harness()
     recorder = Recorder()
     for step in steps:
@@ -137,13 +139,25 @@ def test_property_no_action_while_two_fail(steps):
         else:
             result = h.poll(enabled={step[1]: False})
         if result.decision.proposal is not None:
-            failing = [
+            target = result.decision.proposal.camera
+            others = {k: rt for k, rt in h.engine.cameras.items() if k != target}
+            flowing = [
                 k
-                for k, rt in h.engine.cameras.items()
-                if rt.last_status and rt.last_status.value == "NO_FRAMES"
+                for k, rt in others.items()
+                if rt.last_status and rt.last_status.value == "FRAMES_FLOWING"
             ]
-            assert len(failing) < 2, f"proposed a reboot while multiple cameras failing: {failing}"
-            recorder.dispatch(h, result.decision.proposal.camera)
+            assert flowing, "proposed a reboot with no healthy witness"
+            busy = [k for k, rt in others.items() if rt.state.value in ("BOOT_GRACE",)]
+            assert not busy, f"proposed while another recovery is in boot grace: {busy}"
+            dark_after_reboot = [
+                k
+                for k, rt in others.items()
+                if rt.last_status
+                and rt.last_status.value == "NO_FRAMES"
+                and (rt.store_latched or rt.state.value == "LATCHED")
+            ]
+            assert not dark_after_reboot, f"phased past a failed reboot: {dark_after_reboot}"
+            recorder.dispatch(h, target)
         h.tick()
 
 
@@ -227,3 +241,98 @@ def test_property_single_active_operation(steps):
         ]
         assert len(boot_or_pending) <= 1, f"concurrent operations: {boot_or_pending}"
         h.tick()
+
+
+# ---------------------------------------------------------------- regimes
+#
+# Independent random fps per step almost never sustains a healthy baseline
+# or a complete failure window, so the sequences above rarely reach a
+# proposal. Regimes hold one per-camera pattern for several polls after a
+# healthy warm-up, producing real outages, overlaps, and recoveries.
+
+regime = st.tuples(
+    st.sampled_from([0.0, 5.0]),
+    st.sampled_from([0.0, 5.0]),
+    st.sampled_from([0.0, 5.0]),
+    st.integers(min_value=1, max_value=14),
+    st.sampled_from(["ack", "unknown", "none"]),
+)
+
+
+def run_regimes(regimes, check=None) -> tuple[Recorder, int]:
+    """Drive regimes. Each regime's last field says whether a reboot sent
+    during it restores the camera ("ack"/"unknown") or leaves it dark
+    ("none"). Returns the recorder and the number of proposals made while
+    two or more cameras were failing."""
+    from tests.fakes.harness import warm_up_healthy
+
+    h = make_harness()
+    warm_up_healthy(h)
+    recorder = Recorder()
+    rebooted: set[str] = set()
+    phased = 0
+    for porch, driveway, doorbell, polls, after_reboot in regimes:
+        for _ in range(polls):
+            pattern = {"porch": porch, "driveway": driveway, "doorbell": doorbell}
+            for cam in rebooted:  # a rebooted camera's frames come back
+                pattern[cam] = 5.0
+            result = h.poll(fps=pattern)
+            proposal = result.decision.proposal
+            if proposal is not None:
+                failing = [
+                    k
+                    for k, rt in h.engine.cameras.items()
+                    if rt.last_status and rt.last_status.value == "NO_FRAMES"
+                ]
+                if len(failing) >= 2:
+                    phased += 1
+                if check is not None:
+                    check(h, proposal.camera)
+                sent = recorder.dispatch(h, proposal.camera)
+                if sent is not None and after_reboot != "none":
+                    rebooted.add(proposal.camera)
+            h.tick()
+        rebooted.clear()
+    return recorder, phased
+
+
+def _phased_invariants(h, target: str) -> None:
+    others = {k: rt for k, rt in h.engine.cameras.items() if k != target}
+    flowing = [
+        k for k, rt in others.items() if rt.last_status and rt.last_status.value == "FRAMES_FLOWING"
+    ]
+    assert flowing, "proposed a reboot with no healthy witness"
+    assert not [k for k, rt in others.items() if rt.state.value == "BOOT_GRACE"]
+    assert not [
+        k
+        for k, rt in others.items()
+        if rt.last_status
+        and rt.last_status.value == "NO_FRAMES"
+        and (rt.store_latched or rt.state.value == "LATCHED")
+    ], "phased past a camera a reboot left dark"
+
+
+@settings(max_examples=200, deadline=None, derandomize=True)
+@given(st.lists(regime, min_size=3, max_size=25))
+def test_property_regimes_phased_recovery_invariants(regimes):
+    recorder, _ = run_regimes(regimes, check=_phased_invariants)
+    # never two reboots of one camera within the hourly minimum
+    by_camera: dict[str, list[float]] = {}
+    for camera, acc in recorder.reboots:
+        by_camera.setdefault(camera, []).append(acc)
+    for camera, times in by_camera.items():
+        for a, b in itertools.pairwise(times):
+            assert b - a >= 3600, f"{camera} rebooted twice within an hour: {times}"
+
+
+def test_regime_generator_reaches_phased_recovery():
+    """Non-vacuity: the regime strategy really produces proposals made while
+    several cameras fail, so the property above is exercised, not idle."""
+    from hypothesis import find
+
+    example = find(
+        st.lists(regime, min_size=3, max_size=25),
+        lambda regimes: run_regimes(regimes)[1] > 0,
+        settings=settings(max_examples=2000, deadline=None, database=None),
+    )
+    assert example

@@ -138,18 +138,20 @@ async def main() -> None:
 
         await wait_for(no_extra_reboots, "no second reboot or hidden retry (2 requests total)")
 
-        # 4. group inhibition: two simultaneous failures, no reboots
+        # 4. two simultaneous failures: phased recovery, but the limits hold.
+        # porch is inside its one-hour cooldown from step 3, and driveway is
+        # held by the global five-minute spacing, so nothing is sent.
         frigate.state.cameras["Porch"] = 0.0
         frigate.state.cameras["Driveway"] = 0.0
 
-        async def group_inhibited() -> bool:
+        async def multiple_reported() -> bool:
             stats = await get_json(session, "/stats")
-            return "MULTIPLE_CAMERAS_FAILING" in stats["inhibition_reasons"]
+            return "MULTIPLE_CAMERAS_UNHEALTHY" in stats["global_states"]
 
-        await wait_for(group_inhibited, "group inhibition reported for two failed cameras")
+        await wait_for(multiple_reported, "multi-camera episode reported for two failed cameras")
         await asyncio.sleep(20)
-        assert porch_cam.state.reboots_accepted == 1, "no reboots while group-inhibited"
-        assert drive_cam.state.reboots_accepted == 0, "driveway must not reboot in a group outage"
+        assert porch_cam.state.reboots_accepted == 1, "porch cooldown must hold"
+        assert drive_cam.state.reboots_accepted == 0, "global spacing must hold driveway back"
 
         # 5. history is bounded, sanitized, and carries the incident
         history = await get_json(session, "/history?limit=200")

@@ -163,7 +163,7 @@ async def test_observe_mode_sends_zero_mutating_requests(tmp_path):
         await frigate.stop()
 
 
-async def test_two_failing_cameras_inhibit(tmp_path):
+async def test_two_failing_cameras_are_recovered_one_at_a_time(tmp_path):
     frigate = FakeFrigate()
     base = await frigate.start()
     cam1 = FakeOnvifCamera()
@@ -181,13 +181,50 @@ async def test_two_failing_cameras_inhibit(tmp_path):
         await wait_until(
             lambda: all(service.engine.cameras[k].store_armed for k in config.cameras), timeout=15
         )
+        # Both dark at once; the doorbell stays a healthy witness.
         frigate.state.cameras["Porch"] = 0.0
         frigate.state.cameras["Driveway"] = 0.0
+        await wait_until(lambda: cam1.state.reboots_accepted == 1, timeout=15)
+        await asyncio.sleep(6)
+        # Exactly one camera is asked to reboot; the other waits its turn
+        # (boot grace, confirmation, then the global spacing).
+        assert cam1.state.reboots_accepted == 1
+        assert cam2.state.reboots_accepted == 0
+        history = await http_get(service.health.http_port, "/history?limit=500")
+        kinds = [e["kind"] for e in history["events"]]
+        assert "multiple_failing" in kinds
+    finally:
+        await stop_service(service, run_task, stop)
+        await cam1.stop()
+        await cam2.stop()
+        await frigate.stop()
+
+
+async def test_no_reboots_when_every_camera_is_dark(tmp_path):
+    frigate = FakeFrigate()
+    base = await frigate.start()
+    cam1 = FakeOnvifCamera()
+    ep1 = await cam1.start()
+    cam2 = FakeOnvifCamera()
+    ep2 = await cam2.start()
+    config = fast_config(
+        frigate_base=base,
+        onvif_endpoints={"porch": ep1, "driveway": ep2, "doorbell": "none"},
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    service, run_task, stop = await start_service(config, data)
+    try:
+        await wait_until(
+            lambda: all(service.engine.cameras[k].store_armed for k in config.cameras), timeout=15
+        )
+        for name in ("Porch", "Driveway", "Doorbell"):
+            frigate.state.cameras[name] = 0.0
         await asyncio.sleep(8)
         assert cam1.state.total_requests == 0
         assert cam2.state.total_requests == 0
         stats = await http_get(service.health.http_port, "/stats")
-        assert "MULTIPLE_CAMERAS_FAILING" in stats["inhibition_reasons"]
+        assert "NO_HEALTHY_PEER" in stats["inhibition_reasons"]
     finally:
         await stop_service(service, run_task, stop)
         await cam1.stop()

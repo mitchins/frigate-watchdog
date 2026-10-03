@@ -18,6 +18,11 @@ logger = logging.getLogger("frigate_watchdog.console")
 _HUMAN = {
     "armed": "{camera}: healthy baseline established",
     "frames_stopped": "{camera}: frames stopped ({reason}); observing",
+    "frames_restored": "{camera}: frames restored ({reason}); {detail}",
+    "multiple_failing": "multiple cameras failing: {detail}",
+    "would_recover": "{camera}: would reboot now in recover mode ({reason})",
+    "recovery_held": "{camera}: recovery held ({reason}); all reasons: {detail}",
+    "auth_latched": "{camera}: {detail}",
     "frigate_restarted": "Frigate restarted; failure evidence discarded, restart grace started",
     "monitoring_interrupted": "monitoring gap detected; failure evidence cleared (limits retained)",
     "incident_opened": "{camera}: incident {incident_id} opened",
